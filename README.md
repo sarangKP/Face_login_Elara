@@ -9,6 +9,22 @@ Stateless face recognition microservice for the [Elara Service](https://github.c
 1. **Register** — guided 5-step flow captures your face at different angles (center → left → right → up → tilt). Multiple encodings are stored per user, giving robust matching.
 2. **Login** — a single frame is compared against all stored encodings. The best-distance match across all angles is returned with a confidence score and a session token.
 
+### Under the hood
+
+No model is trained on your machine. The pipeline is:
+
+1. **Detection** — a HOG (Histogram of Oriented Gradients) + SVM detector locates the face in the frame. Classical computer vision, no neural network, fast on Pi.
+2. **Landmark alignment** — 68 points (eyes, nose, jaw, mouth) are predicted on the detected face. The eye centres and nose tip are used to compute an affine transform (rotation + scale + translation) that warps the crop into a fixed 150×150 template. This ensures the face is always upright and centred before the next step.
+3. **Embedding** — the aligned crop is passed through a pre-trained **ResNet-34** (ships inside `face_recognition_models`). It outputs a **128-number vector** that encodes the geometry of the face. Similar faces produce similar vectors. You never train this network — the weights are fixed.
+4. **Matching** — at login, the Euclidean distance between the probe vector and every stored vector is computed. Distance < 0.5 → same person. No neural network — just maths.
+
+```
+Register: frame → detect → align → ResNet-34 → 128 floats  →  saved to db.json
+Login:    frame → detect → align → ResNet-34 → 128 floats  →  distance compare → match
+```
+
+`db.json` is not a model — it is a lookup table of 128-number vectors, one per registered face angle.
+
 ---
 
 ## Prerequisites
