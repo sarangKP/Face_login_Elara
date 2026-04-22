@@ -1,6 +1,6 @@
 # Face Login — Elara Service
 
-Stateless face recognition microservice for the [Elara Service](https://github.com/sarangKP/Elara_service). Built with FastAPI + `face_recognition` (dlib/HOG). Runs on laptop for development and on Raspberry Pi with the camera module for deployment.
+Stateless face recognition microservice for the [Elara Service](https://github.com/sarangKP/Elara_service). Built with FastAPI + `face_recognition` (dlib/HOG).
 
 ---
 
