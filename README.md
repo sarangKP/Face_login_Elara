@@ -11,7 +11,7 @@ Stateless face recognition microservice for the [Elara Service](https://github.c
 
 ### Under the hood
 
-No model is trained on your machine. The pipeline is:
+No model is trained on the machine. The pipeline is:
 
 1. **Detection** — a HOG (Histogram of Oriented Gradients) + SVM detector locates the face in the frame. Classical computer vision, no neural network, fast on Pi.
 2. **Landmark alignment** — 68 points (eyes, nose, jaw, mouth) are predicted on the detected face. The eye centres and nose tip are used to compute an affine transform (rotation + scale + translation) that warps the crop into a fixed 150×150 template. This ensures the face is always upright and centred before the next step.
