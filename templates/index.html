@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Face Login — Elara</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f13;
+      color: #e8e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    h1 { font-size: 1.5rem; font-weight: 600; color: #fff; }
+    .subtitle { font-size: 0.8rem; color: #6b7280; margin-bottom: 1.75rem; }
+
+    .card {
+      background: #18181f;
+      border: 1px solid #2a2a35;
+      border-radius: 16px;
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 420px;
+    }
+
+    /* ── Camera ─────────────────────────────────────── */
+    .cam-wrap {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #0a0a0e;
+      aspect-ratio: 4/3;
+      margin-bottom: 1.1rem;
+    }
+    #video {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      display: block;
+    }
+
+    /* oval guide overlay */
+    .oval-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .oval {
+      width: 54%;
+      aspect-ratio: 3/4;
+      border: 3px solid rgba(108,99,255,0.5);
+      border-radius: 50%;
+      box-shadow: 0 0 0 2000px rgba(0,0,0,0.38);
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .oval.detected { border-color: #10b981; box-shadow: 0 0 0 2000px rgba(0,0,0,0.38), 0 0 14px 4px rgba(16,185,129,0.35); }
+    .oval.capturing { border-color: #f59e0b; animation: pulse 0.5s ease-in-out 3; }
+
+    @keyframes pulse {
+      0%,100% { transform: scale(1); }
+      50%      { transform: scale(1.04); }
+    }
+
+    /* direction arrow */
+    .arrow-hint {
+      position: absolute;
+      font-size: 2rem;
+      opacity: 0;
+      transition: opacity 0.3s, transform 0.3s;
+      pointer-events: none;
+    }
+    .arrow-hint.show { opacity: 1; }
+    .arrow-hint.left  { left: 8%;  top: 50%; transform: translateY(-50%); }
+    .arrow-hint.right { right: 8%; top: 50%; transform: translateY(-50%); }
+    .arrow-hint.up    { top: 6%;  left: 50%; transform: translateX(-50%); }
+    .arrow-hint.tilt  { bottom: 8%; left: 50%; transform: translateX(-50%) rotate(15deg); }
+
+    /* flash on capture */
+    .flash {
+      position: absolute;
+      inset: 0;
+      background: #fff;
+      opacity: 0;
+      pointer-events: none;
+      border-radius: 12px;
+    }
+    .flash.go { animation: flashAnim 0.25s ease-out forwards; }
+    @keyframes flashAnim { 0%{opacity:0.55} 100%{opacity:0} }
+
+    /* ── Step progress dots ─────────────────────────── */
+    .steps {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-bottom: 0.9rem;
+    }
+    .step-dot {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: #2a2a35;
+      border: 2px solid #2a2a35;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem;
+      color: #6b7280;
+      transition: all 0.25s;
+      flex-shrink: 0;
+    }
+    .step-dot.active  { border-color: #6c63ff; color: #a78bfa; background: #1a1a2e; }
+    .step-dot.done    { background: #10b981; border-color: #10b981; color: #fff; }
+    .step-connector { width: 18px; height: 2px; background: #2a2a35; border-radius: 1px; flex-shrink: 0; }
+    .step-connector.done { background: #10b981; }
+
+    /* ── Instruction text ───────────────────────────── */
+    .instruction {
+      text-align: center;
+      font-size: 0.92rem;
+      font-weight: 500;
+      color: #c4b5fd;
+      min-height: 1.4em;
+      margin-bottom: 1rem;
+      transition: opacity 0.2s;
+    }
+
+    /* ── Tabs ───────────────────────────────────────── */
+    .tabs { display: flex; gap: 0.4rem; margin-bottom: 1rem; }
+    .tab {
+      flex: 1; padding: 0.5rem 0;
+      background: #0f0f13;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      color: #6b7280;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .tab.active { background: #6c63ff; border-color: #6c63ff; color: #fff; font-weight: 600; }
+
+    .panel { display: none; flex-direction: column; gap: 0.65rem; }
+    .panel.active { display: flex; }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 0.6rem 0.85rem;
+      background: #0f0f13;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      color: #e8e8f0;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus { border-color: #6c63ff; }
+
+    button.primary {
+      width: 100%; padding: 0.65rem;
+      background: #6c63ff; border: none; border-radius: 8px;
+      color: #fff; font-size: 0.92rem; font-weight: 600;
+      cursor: pointer; transition: background 0.15s, opacity 0.15s;
+    }
+    button.primary:hover { background: #5a52e0; }
+    button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.secondary {
+      width: 100%; padding: 0.55rem;
+      background: transparent; border: 1px solid #2a2a35; border-radius: 8px;
+      color: #6b7280; font-size: 0.85rem; cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    button.secondary:hover { border-color: #6c63ff; color: #a78bfa; }
+
+    /* ── Status ─────────────────────────────────────── */
+    .status {
+      margin-top: 0.85rem;
+      padding: 0.7rem 0.9rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      display: none;
+    }
+    .status.success { background: #0d2b1f; border: 1px solid #10b981; color: #6ee7b7; display: block; }
+    .status.error   { background: #2b0d0d; border: 1px solid #ef4444; color: #fca5a5; display: block; }
+    .status.info    { background: #0d1a2b; border: 1px solid #3b82f6; color: #93c5fd; display: block; }
+
+    .confidence-bar { margin-top: 0.4rem; height: 4px; background: #2a2a35; border-radius: 2px; overflow: hidden; }
+    .confidence-fill { height: 100%; background: #10b981; border-radius: 2px; transition: width 0.4s ease; }
+
+    .reg-list { margin-top: 0.75rem; font-size: 0.78rem; color: #6b7280; }
+    .reg-list span { color: #a78bfa; font-weight: 500; }
+
+    /* countdown overlay */
+    .countdown {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 5rem;
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 2px 16px rgba(0,0,0,0.7);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .countdown.show { opacity: 1; }
+    .countdown.tick { animation: countTick 0.9s ease-out forwards; }
+    @keyframes countTick {
+      0%   { transform: scale(1.3); opacity: 1; }
+      80%  { transform: scale(0.9); opacity: 1; }
+      100% { transform: scale(0.9); opacity: 0; }
+    }
+
+    /* hide steps/instruction when not registering */
+    .reg-only { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Elara Face Login</h1>
+  <p class="subtitle">Face recognition microservice</p>
+
+  <div class="card">
+
+    <!-- Camera feed -->
+    <div class="cam-wrap">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas" style="display:none"></canvas>
+      <div class="oval-overlay"><div class="oval" id="oval"></div></div>
+      <div class="arrow-hint left"  id="arr-left">←</div>
+      <div class="arrow-hint right" id="arr-right">→</div>
+      <div class="arrow-hint up"    id="arr-up">↑</div>
+      <div class="arrow-hint tilt"  id="arr-tilt">↺</div>
+      <div class="flash" id="flash"></div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+
+    <!-- Step dots (register only) -->
+    <div class="steps reg-only" id="steps-row"></div>
+    <div class="instruction reg-only" id="instruction-text"></div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('login')">Login</button>
+      <button class="tab"        onclick="switchTab('register')">Register</button>
+    </div>
+
+    <!-- Login panel -->
+    <div id="panel-login" class="panel active">
+      <button class="primary" id="btn-login" onclick="doLogin()">Scan &amp; Login</button>
+    </div>
+
+    <!-- Register panel -->
+    <div id="panel-register" class="panel">
+      <input type="text" id="reg-name" placeholder="Your name" autocomplete="off"/>
+      <button class="primary"    id="btn-start-reg"  onclick="startRegistration()">Start Face Registration</button>
+      <button class="secondary"  id="btn-cancel-reg" onclick="cancelRegistration()" style="display:none">Cancel</button>
+    </div>
+
+    <div id="status" class="status"></div>
+    <div id="reg-list" class="reg-list"></div>
+  </div>
+
+  <script>
+  // ── Constants ───────────────────────────────────────────────────────────────
+  const STEPS = [
+    { label: '1', hint: 'Look straight ahead',       arrow: null,       symbol: '😐' },
+    { label: '2', hint: 'Turn slightly left',         arrow: 'arr-left', symbol: '←'  },
+    { label: '3', hint: 'Turn slightly right',        arrow: 'arr-right',symbol: '→'  },
+    { label: '4', hint: 'Tilt your head up slightly', arrow: 'arr-up',   symbol: '↑'  },
+    { label: '5', hint: 'Tilt your head to one side', arrow: 'arr-tilt', symbol: '↺'  },
+  ];
+  const COUNTDOWN_FROM = 3;    // seconds before each capture
+  const JPEG_QUALITY   = 0.82;
+  const MAX_WIDTH      = 640;
+
+  // ── State ───────────────────────────────────────────────────────────────────
+  let registering    = false;
+  let currentStep    = 0;
+  let capturedFrames = [];
+  let captureTimer   = null;
+
+  // ── Camera ──────────────────────────────────────────────────────────────────
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  navigator.mediaDevices.getUserMedia({ video: { width:640, height:480, facingMode:'user' }, audio:false })
+    .then(s => { video.srcObject = s; })
+    .catch(() => showStatus('error', 'Camera unavailable'));
+
+  // ── Capture helpers ─────────────────────────────────────────────────────────
+  function captureFrame(quality = JPEG_QUALITY) {
+    const W = video.videoWidth  || 640;
+    const H = video.videoHeight || 480;
+    let dW = W, dH = H;
+    if (W > MAX_WIDTH) { dH = Math.round(H * MAX_WIDTH / W); dW = MAX_WIDTH; }
+    canvas.width = dW; canvas.height = dH;
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, -dW, 0, dW, dH);
+    ctx.restore();
+    return canvas.toDataURL('image/jpeg', quality);
+  }
+
+  function triggerFlash() {
+    const f = document.getElementById('flash');
+    f.className = 'flash';
+    requestAnimationFrame(() => { f.className = 'flash go'; });
+  }
+
+  // ── Tab switching ────────────────────────────────────────────────────────────
+  function switchTab(tab) {
+    cancelRegistration();
+    document.querySelectorAll('.tab').forEach((t,i) =>
+      t.classList.toggle('active', (i===0 && tab==='login') || (i===1 && tab==='register')));
+    document.getElementById('panel-login').classList.toggle('active', tab==='login');
+    document.getElementById('panel-register').classList.toggle('active', tab==='register');
+    document.querySelectorAll('.reg-only').forEach(el => el.style.display = 'none');
+    document.getElementById('status').className = 'status';
+  }
+
+  // ── Status ───────────────────────────────────────────────────────────────────
+  function showStatus(type, html) {
+    const el = document.getElementById('status');
+    el.className = 'status ' + type;
+    el.innerHTML = html;
+  }
+
+  // ── Login ────────────────────────────────────────────────────────────────────
+  async function doLogin() {
+    const btn = document.getElementById('btn-login');
+    btn.disabled = true;
+    showStatus('info', 'Scanning…');
+    try {
+      const image = captureFrame();
+      const res  = await fetch('/login', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ image })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus('error', `⚠ ${data.detail}`);
+      } else if (data.success) {
+        const bar = `<div class="confidence-bar"><div class="confidence-fill" style="width:${data.confidence}%"></div></div>`;
+        showStatus('success',
+          `✓ Welcome, <strong>${data.name}</strong><br>Confidence: ${data.confidence}%${bar}` +
+          `<br><small style="opacity:.55">Token: ${data.token}</small>`);
+      } else {
+        showStatus('error', '✗ Face not recognized. Register first or try better lighting.');
+      }
+    } catch(e) { showStatus('error', 'Network error: ' + e.message); }
+    btn.disabled = false;
+  }
+
+  // ── Registration ─────────────────────────────────────────────────────────────
+  function buildStepDots() {
+    const row = document.getElementById('steps-row');
+    row.innerHTML = '';
+    STEPS.forEach((s, i) => {
+      const dot = document.createElement('div');
+      dot.className = 'step-dot' + (i === 0 ? ' active' : '');
+      dot.id = `dot-${i}`;
+      dot.textContent = s.label;
+      row.appendChild(dot);
+      if (i < STEPS.length - 1) {
+        const conn = document.createElement('div');
+        conn.className = 'step-connector';
+        conn.id = `conn-${i}`;
+        row.appendChild(conn);
+      }
+    });
+  }
+
+  function updateStepUI(step) {
+    STEPS.forEach((_, i) => {
+      const dot  = document.getElementById(`dot-${i}`);
+      const conn = document.getElementById(`conn-${i}`);
+      if (i < step)       { dot.className = 'step-dot done'; dot.textContent = '✓'; }
+      else if (i === step) { dot.className = 'step-dot active'; dot.textContent = STEPS[i].label; }
+      else                 { dot.className = 'step-dot'; dot.textContent = STEPS[i].label; }
+      if (conn) conn.className = 'step-connector' + (i < step ? ' done' : '');
+    });
+    // instruction text
+    const instr = document.getElementById('instruction-text');
+    if (step < STEPS.length) {
+      instr.textContent = STEPS[step].hint;
+      instr.style.opacity = '1';
+    }
+    // arrows
+    ['arr-left','arr-right','arr-up','arr-tilt'].forEach(id =>
+      document.getElementById(id).classList.remove('show'));
+    const arr = step < STEPS.length && STEPS[step].arrow;
+    if (arr) document.getElementById(arr).classList.add('show');
+  }
+
+  function startRegistration() {
+    const name = document.getElementById('reg-name').value.trim();
+    if (!name) { showStatus('error', 'Enter your name first.'); return; }
+
+    registering = true;
+    currentStep = 0;
+    capturedFrames = [];
+
+    document.querySelectorAll('.reg-only').forEach(el => el.style.display = 'flex');
+    document.getElementById('steps-row').style.display = 'flex';
+    document.getElementById('btn-start-reg').style.display = 'none';
+    document.getElementById('btn-cancel-reg').style.display = '';
+    document.getElementById('reg-name').disabled = true;
+    document.getElementById('status').className = 'status';
+
+    buildStepDots();
+    updateStepUI(0);
+    scheduleCapture();
+  }
+
+  function scheduleCapture() {
+    clearTimeout(captureTimer);
+    runCountdown(COUNTDOWN_FROM);
+  }
+
+  function runCountdown(n) {
+    if (!registering) return;
+    const cd = document.getElementById('countdown');
+    cd.textContent = n;
+    cd.className = 'countdown';
+    // force reflow so animation retriggers each tick
+    void cd.offsetWidth;
+    cd.className = 'countdown tick';
+
+    if (n > 1) {
+      captureTimer = setTimeout(() => runCountdown(n - 1), 1000);
+    } else {
+      captureTimer = setTimeout(captureStep, 1000);
+    }
+  }
+
+  function captureStep() {
+    if (!registering) return;
+
+    // hide countdown
+    const cd = document.getElementById('countdown');
+    cd.className = 'countdown';
+
+    const oval = document.getElementById('oval');
+    oval.classList.add('capturing');
+    triggerFlash();
+    setTimeout(() => oval.classList.remove('capturing'), 600);
+
+    capturedFrames.push(captureFrame());
+    currentStep++;
+
+    if (currentStep < STEPS.length) {
+      updateStepUI(currentStep);
+      scheduleCapture();
+    } else {
+      document.getElementById(`dot-${STEPS.length-1}`).className = 'step-dot done';
+      document.getElementById(`dot-${STEPS.length-1}`).textContent = '✓';
+      document.getElementById('instruction-text').textContent = 'Processing…';
+      finaliseRegistration();
+    }
+  }
+
+  async function finaliseRegistration() {
+    registering = false;
+    const name = document.getElementById('reg-name').value.trim();
+    showStatus('info', `Sending ${capturedFrames.length} frames to server…`);
+    try {
+      const res  = await fetch('/register', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ name, images: capturedFrames })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus('error', `⚠ ${data.detail}`);
+      } else {
+        showStatus('success', `✓ ${data.message}`);
+        document.getElementById('reg-name').value = '';
+        refreshRegistered();
+      }
+    } catch(e) { showStatus('error', 'Network error: ' + e.message); }
+    resetRegUI();
+  }
+
+  function cancelRegistration() {
+    registering = false;
+    clearTimeout(captureTimer);
+    capturedFrames = [];
+    document.getElementById('countdown').className = 'countdown';
+    resetRegUI();
+    // reset arrows
+    ['arr-left','arr-right','arr-up','arr-tilt'].forEach(id =>
+      document.getElementById(id).classList.remove('show'));
+  }
+
+  function resetRegUI() {
+    document.querySelectorAll('.reg-only').forEach(el => el.style.display = 'none');
+    document.getElementById('btn-start-reg').style.display = '';
+    document.getElementById('btn-cancel-reg').style.display = 'none';
+    document.getElementById('reg-name').disabled = false;
+    document.getElementById('oval').className = 'oval';
+  }
+
+  // ── Registered faces list ────────────────────────────────────────────────────
+  async function refreshRegistered() {
+    try {
+      const res  = await fetch('/faces');
+      const data = await res.json();
+      const el   = document.getElementById('reg-list');
+      el.innerHTML = data.faces.length
+        ? 'Registered: ' + data.faces.map(n => `<span>${n}</span>`).join(', ')
+        : '';
+    } catch {}
+  }
+
+  refreshRegistered();
+  </script>
+</body>
+</html>
