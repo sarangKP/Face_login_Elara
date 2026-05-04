@@ -215,14 +215,51 @@ async def camera_frame():
 
 The front-end can then poll `/camera/frame` instead of `getUserMedia`.
 
+### Servo control on Pi 5 — use lgpio, not pigpio
+
+Pi 5 uses the **RP1 southbridge chip** for GPIO. `pigpio` and `RPi.GPIO` both target the old Broadcom DMA hardware and **do not work** on Pi 5.
+
+| Library | Pi 1–4 | Pi 5 | Notes |
+|---------|--------|------|-------|
+| `pigpio` | ✅ | ❌ | Needs DMA registers — absent on RP1 |
+| `RPi.GPIO` | ⚠️ jittery | ❌ | Software PWM only, RP1 unsupported |
+| `lgpio` | ✅ | ✅ | Pi Foundation's official replacement, no daemon |
+
+The project uses `lgpio`. Install it on Pi:
+
+```bash
+sudo apt install python3-lgpio
+# or:
+pip install lgpio
+```
+
+To enable real servo control, set `SIMULATE = False` in `servo.py`. No daemon or background service needed — unlike pigpio.
+
+```
+Pan servo  signal wire → BCM GPIO 17  (physical pin 11)
+Tilt servo signal wire → BCM GPIO 18  (physical pin 12)
+Servo power (red/+)    → external 5 V supply
+Servo ground           → common GND with Pi
+```
+
+> **Important:** power servos from a separate 5 V supply, not the Pi's 5 V pin. Two SG90 servos drawing stall current can brown-out the Pi and corrupt the SD card.
+
+### Tracking endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/track/status` | Pan/tilt angles, error offsets, FPS, simulate flag |
+| `GET` | `/track/snapshot` | Latest annotated JPEG frame (open in browser) |
+
 ### Performance tips for Pi
 
 | Setting | Value | Reason |
 |---------|-------|--------|
 | Input resolution | 640 × 480 | Enforced in `decode_image()` |
+| Tracker detect resolution | 320 × 240 | Haar runs at ~15–30 ms/frame here |
 | `num_jitters` on login | 1 | Fastest; multi-angle DB compensates |
-| Face detector | HOG (default) | CNN is more accurate but too slow on Pi CPU |
-| JPEG quality | 0.82 | Reduce to 0.7 if Pi-to-server bandwidth is tight |
+| Face detector (tracking) | Haar cascade | 10–30 ms vs 150–300 ms for HOG/dlib |
+| JPEG quality | 0.82 | Reduce to 0.7 if bandwidth is tight |
 
 ---
 
@@ -230,7 +267,10 @@ The front-end can then poll `/camera/frame` instead of `getUserMedia`.
 
 ```
 Face_Login/
-├── main.py              # FastAPI app — all endpoints
+├── main.py              # FastAPI app — all endpoints + tracker lifespan
+├── tracker.py           # CameraManager + FaceTracker (detection + PID loop)
+├── pid.py               # Discrete PID controller with anti-windup
+├── servo.py             # Servo abstraction — lgpio (real) or sim mode
 ├── templates/
 │   └── index.html       # Guided registration + login UI
 ├── faces/

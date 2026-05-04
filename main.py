@@ -1,5 +1,6 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import face_recognition
@@ -11,7 +12,31 @@ import cv2
 from pathlib import Path
 from typing import List
 
-app = FastAPI(title="Face Login Service")
+from tracker import FaceTracker
+
+# ── Tracker (started/stopped with the server) ─────────────────────────────────
+_tracker: FaceTracker | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _tracker
+    try:
+        _tracker = FaceTracker()
+        _tracker.start()
+    except Exception as e:
+        # Non-fatal — face login still works without a local camera
+        import logging
+        logging.getLogger(__name__).warning(
+            "FaceTracker could not start (%s). "
+            "Tracking endpoints will return 503. "
+            "Connect a camera and restart to enable tracking.", e
+        )
+        _tracker = None
+    yield                           # server runs here
+    if _tracker:
+        _tracker.stop()
+
+app = FastAPI(title="Face Login Service", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,3 +184,33 @@ async def delete_face(name: str):
     del db[name]
     save_db(db)
     return {"success": True, "message": f"Deleted '{name}'"}
+
+
+# ── Tracking endpoints ────────────────────────────────────────────────────────
+
+@app.get("/track/status")
+async def track_status():
+    """Current pan/tilt angles, face position, and loop FPS."""
+    if not _tracker:
+        raise HTTPException(status_code=503, detail="Tracker not running")
+    s = _tracker.state
+    return {
+        "pan":        round(s.pan,  1),
+        "tilt":       round(s.tilt, 1),
+        "error_x":    s.error_x,
+        "error_y":    s.error_y,
+        "face_found": s.face_found,
+        "fps":        s.fps,
+        "simulate":   _tracker.simulate,
+    }
+
+
+@app.get("/track/snapshot")
+async def track_snapshot():
+    """Latest annotated camera frame as a JPEG image (for browser debug view)."""
+    if not _tracker:
+        raise HTTPException(status_code=503, detail="Tracker not running")
+    jpeg = _tracker.state.annotated_jpeg
+    if not jpeg:
+        raise HTTPException(status_code=503, detail="No frame available yet")
+    return Response(content=jpeg, media_type="image/jpeg")
