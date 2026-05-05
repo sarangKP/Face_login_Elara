@@ -68,13 +68,16 @@ TARGET_FPS = 20           # tracker loop rate (frames processed per second)
 
 class CameraManager:
     """
-    Singleton camera source.
+    Singleton camera source with two modes:
 
-    On Raspberry Pi with camera module → uses picamera2 (libcamera stack).
-    Anywhere else (laptop dev)          → falls back to OpenCV VideoCapture.
+    Hardware mode (Pi / USB webcam not held by browser):
+        picamera2 → libcamera stack (Pi Camera Module)
+        OpenCV    → V4L2 fallback
 
-    A background thread continuously fills a one-frame buffer so any caller
-    can call get_frame() without blocking on camera I/O.
+    Browser-feed mode (laptop dev / single camera shared with browser):
+        Browser captures via getUserMedia and POSTs frames to /track/feed.
+        inject_frame() is called by that endpoint — no camera opened here.
+        Automatically activated when no hardware camera is available.
     """
 
     _instance: Optional["CameraManager"] = None
@@ -84,7 +87,6 @@ class CameraManager:
         with cls._lock:
             if cls._instance is None:
                 obj = super().__new__(cls)
-                obj._ready = False
                 obj._init_camera()
                 cls._instance = obj
         return cls._instance
@@ -96,9 +98,9 @@ class CameraManager:
         self._latest_frame: Optional[np.ndarray] = None
         self._cap          = None
         self._picam        = None
-        self._running      = False
+        self._running      = True
 
-        # Pi Camera Module (picamera2 / libcamera)
+        # 1. Try Pi camera module
         try:
             from picamera2 import Picamera2
             self._picam = Picamera2()
@@ -107,61 +109,60 @@ class CameraManager:
             )
             self._picam.configure(config)
             self._picam.start()
-            self._source = "picamera2"
+            self.source = "picamera2"
             log.info("CameraManager: picamera2 opened (640×480 RGB)")
-        except Exception as e:
-            log.info("CameraManager: picamera2 unavailable (%s) — trying OpenCV webcam", e)
-            self._cap = cv2.VideoCapture(0)
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self._cap.set(cv2.CAP_PROP_FPS, 30)
-            if not self._cap.isOpened():
-                self._cap = None
-                self._source = "none"
-                log.warning("CameraManager: no camera found — tracker will idle. "
-                            "Connect a camera and restart.")
-                self._running = True
-                return          # skip capture thread — get_frame() will return None
-            self._source = "opencv"
-            log.info("CameraManager: OpenCV VideoCapture opened (webcam 0)")
+            threading.Thread(target=self._capture_loop, daemon=True, name="CamCapture").start()
+            return
+        except Exception:
+            pass
 
-        self._running = True
-        t = threading.Thread(target=self._capture_loop, daemon=True, name="CamCapture")
-        t.start()
-        self._ready = True
+        # 2. Browser-feed mode — browser owns the webcam via getUserMedia.
+        #    On a laptop there is only one camera. If the server opens it with
+        #    OpenCV, the browser's getUserMedia gets locked out → black screen.
+        #    So on non-Pi hardware we never touch the webcam from the server.
+        #    The /track page captures frames via getUserMedia and POSTs them
+        #    to /track/feed; the server annotates and streams them back.
+        self.source = "browser"
+        log.info("CameraManager: browser-feed mode — "
+                 "/track page will send frames via POST /track/feed")
 
     def _capture_loop(self) -> None:
-        """Runs in a daemon thread — continuously refreshes the frame buffer."""
+        """Hardware capture thread — only runs in picamera2 / opencv modes."""
         while self._running:
             frame = None
             try:
                 if self._picam:
-                    # capture_array() is non-blocking once the camera is streaming
-                    frame = self._picam.capture_array()          # RGB uint8
+                    frame = self._picam.capture_array()
                 elif self._cap:
                     ok, bgr = self._cap.read()
                     if ok:
                         frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             except Exception as e:
-                log.warning("CameraManager: capture error: %s", e)
+                log.warning("CameraManager capture error: %s", e)
 
             if frame is not None:
                 with self._frame_lock:
                     self._latest_frame = frame
-
-            time.sleep(0.008)   # ~125 fps ceiling — camera is the real bottleneck
+            time.sleep(0.008)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def get_frame(self) -> Optional[np.ndarray]:
+    def inject_frame(self, frame: np.ndarray) -> None:
         """
-        Returns a copy of the latest RGB frame, or None if not ready yet.
-        Thread-safe; non-blocking.
+        Accept a frame from an external source (browser POST /track/feed).
+        Works in any mode — also lets the browser override hardware in a pinch.
         """
         with self._frame_lock:
-            if self._latest_frame is None:
-                return None
-            return self._latest_frame.copy()
+            self._latest_frame = frame
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        """Returns the latest RGB frame (copy). Thread-safe, non-blocking."""
+        with self._frame_lock:
+            return self._latest_frame.copy() if self._latest_frame is not None else None
+
+    @property
+    def is_browser_mode(self) -> bool:
+        return self.source == "browser"
 
     def shutdown(self) -> None:
         self._running = False

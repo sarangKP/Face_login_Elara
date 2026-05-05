@@ -353,8 +353,11 @@
       } else if (data.success) {
         const bar = `<div class="confidence-bar"><div class="confidence-fill" style="width:${data.confidence}%"></div></div>`;
         showStatus('success',
-          `✓ Welcome, <strong>${data.name}</strong><br>Confidence: ${data.confidence}%${bar}` +
-          `<br><small style="opacity:.55">Token: ${data.token}</small>`);
+          `✓ Welcome, <strong>${data.name}</strong><br>Confidence: ${data.confidence}%${bar}`);
+        // Hand off to the tracking page, carrying name + token in the URL
+        setTimeout(() => {
+          window.location.href = `/track?name=${encodeURIComponent(data.name)}&token=${data.token}`;
+        }, 900);   // brief pause so the user sees the welcome message
       } else {
         showStatus('error', '✗ Face not recognized. Register first or try better lighting.');
       }

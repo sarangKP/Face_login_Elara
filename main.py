@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import face_recognition
@@ -12,7 +13,7 @@ import cv2
 from pathlib import Path
 from typing import List
 
-from tracker import FaceTracker
+from tracker import FaceTracker, CameraManager
 
 # ── Tracker (started/stopped with the server) ─────────────────────────────────
 _tracker: FaceTracker | None = None
@@ -48,8 +49,42 @@ app.add_middleware(
 FACES_DB = Path("faces/db.json")
 FACES_DB.parent.mkdir(exist_ok=True)
 
+# Stores the last image received by /login for debugging
+_last_login_frame: bytes = b""
+
 TOLERANCE = 0.50          # stricter with multi-angle encodings
 MIN_FRAMES = 3            # minimum good frames required for registration
+
+# Haar cascade — shared across requests, loaded once at startup
+_haar = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
+
+def detect_faces_haar(rgb_img: np.ndarray) -> list:
+    """
+    Detect face locations using Haar cascade (fast, works where dlib HOG fails).
+    Returns locations in face_recognition format: [(top, right, bottom, left), ...]
+
+    Why: dlib's HOG detector (used by face_recognition internally) misses faces
+    on many laptop webcams. Haar is more tolerant of lighting and face size.
+    We detect with Haar, then pass those boxes straight to face_encodings() so
+    dlib only computes the embedding — it skips its broken detection step.
+    """
+    gray = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+    cv2.equalizeHist(gray, gray)
+
+    faces = _haar.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=4,
+        minSize=(40, 40),
+    )
+    if not len(faces):
+        return []
+
+    # Convert (x, y, w, h) → (top, right, bottom, left) for face_recognition
+    return [(y, x + w, y + h, x) for (x, y, w, h) in faces]
 
 
 def load_db() -> dict:
@@ -114,8 +149,10 @@ async def register(req: RegisterRequest):
     encodings = []
     for i, img_b64 in enumerate(req.images):
         try:
-            img = decode_image(img_b64)
-            found = face_recognition.face_encodings(img, num_jitters=1)
+            img  = decode_image(img_b64)
+            locs = detect_faces_haar(img)      # Haar detects, dlib encodes
+            found = face_recognition.face_encodings(img, known_face_locations=locs,
+                                                    num_jitters=1)
             if found:
                 encodings.append(found[0].tolist())
         except Exception:
@@ -140,12 +177,23 @@ async def register(req: RegisterRequest):
 
 @app.post("/login")
 async def login(req: LoginRequest):
+    global _last_login_frame
     img = decode_image(req.image)
-    # num_jitters=1 keeps it fast; good enough with multi-angle DB
-    encodings = face_recognition.face_encodings(img, num_jitters=1)
 
+    # Save for /debug/last-frame
+    _, _buf = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
+                           [cv2.IMWRITE_JPEG_QUALITY, 90])
+    _last_login_frame = _buf.tobytes()
+
+    locations = detect_faces_haar(img)         # Haar detects, dlib encodes
+    encodings = face_recognition.face_encodings(img, known_face_locations=locations,
+                                                num_jitters=1)
     if not encodings:
-        raise HTTPException(status_code=400, detail="No face detected")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No face detected — brightness={round(float(np.mean(img)),1)}/255. "
+                   f"Open /debug/last-frame to see what the server received."
+        )
 
     db = load_db()
     if not db:
@@ -207,10 +255,73 @@ async def track_status():
 
 @app.get("/track/snapshot")
 async def track_snapshot():
-    """Latest annotated camera frame as a JPEG image (for browser debug view)."""
+    """Latest annotated camera frame as a JPEG image."""
     if not _tracker:
         raise HTTPException(status_code=503, detail="Tracker not running")
     jpeg = _tracker.state.annotated_jpeg
     if not jpeg:
         raise HTTPException(status_code=503, detail="No frame available yet")
     return Response(content=jpeg, media_type="image/jpeg")
+
+
+@app.post("/track/feed")
+async def track_feed(req: LoginRequest):
+    """
+    Receive a camera frame from the browser (base64 JPEG).
+    Used in browser-feed mode when the hardware camera is held by the browser.
+    The tracker processes this frame exactly like a hardware frame.
+    """
+    cam = CameraManager()
+    img = decode_image(req.image)   # → RGB numpy array, already resized to ≤640px
+    cam.inject_frame(img)
+    return {"ok": True, "source": cam.source}
+
+
+@app.get("/track/source")
+async def track_source():
+    """Returns which camera source the tracker is using."""
+    return {"source": CameraManager().source}
+
+
+@app.get("/debug/last-frame")
+async def debug_last_frame():
+    """
+    Returns the last image received by POST /login as a JPEG.
+    Open in browser to verify the server actually sees your face.
+    Remove this endpoint before production deployment.
+    """
+    if not _last_login_frame:
+        raise HTTPException(status_code=404, detail="No login attempt yet")
+    return Response(content=_last_login_frame, media_type="image/jpeg")
+
+
+@app.get("/track/stream")
+async def track_stream():
+    """
+    MJPEG stream of the annotated camera feed.
+    Point an <img> tag at this URL — browser displays it as live video.
+    Runs at the same rate as the tracker loop (~20 fps).
+    """
+    if not _tracker:
+        raise HTTPException(status_code=503, detail="Tracker not running")
+
+    async def generate():
+        while True:
+            jpeg = _tracker.state.annotated_jpeg
+            if jpeg:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                )
+            await asyncio.sleep(0.05)   # 20 fps ceiling
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/track", response_class=HTMLResponse)
+async def track_monitor():
+    """Live tracking monitor page."""
+    return Path("templates/track.html").read_text()
