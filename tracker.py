@@ -48,16 +48,16 @@ SCALE_FACTOR    = 1.15    # pyramid scale per step; smaller = slower but finds m
 MIN_NEIGHBOURS  = 4       # higher = fewer false positives, may miss quick moves
 MIN_FACE_PX     = 40      # ignore detections smaller than this (noise, background)
 
-DEADBAND_PX = 15          # pixel radius around centre — no servo move inside this zone
+DEADBAND_PX = 20          # pixel radius around centre — no servo move inside this zone
 
 # ── PID gains ─────────────────────────────────────────────────────────────────
-# Tuned conservatively for a standard SG90/MG996R on a Pi 5.
-# If tracking is sluggish → increase kp slightly (e.g. 0.07 → 0.10).
-# If mount oscillates  → increase kd (e.g. 0.003 → 0.006).
-# Ki = 0 intentionally — add only after physical testing (integral windup hunts).
-PAN_PID_GAINS  = dict(kp=0.03, ki=0.0, kd=0.002,
+# Tuned for SG90/MG996R on Pi 5 via ESP32 serial.
+# If tracking is sluggish → increase kp (e.g. 0.025 → 0.04).
+# If mount oscillates    → increase kd (e.g. 0.006 → 0.010) or reduce kp.
+# Ki = 0 intentionally — add only after Kp/Kd are stable on real hardware.
+PAN_PID_GAINS  = dict(kp=0.025, ki=0.0, kd=0.006,
                       output_limits=(-5.0,  5.0),  deadband=DEADBAND_PX)
-TILT_PID_GAINS = dict(kp=0.03, ki=0.0, kd=0.002,
+TILT_PID_GAINS = dict(kp=0.025, ki=0.0, kd=0.006,
                       output_limits=(-4.0,  4.0),  deadband=DEADBAND_PX)
 
 TARGET_FPS = 20           # tracker loop rate (frames processed per second)

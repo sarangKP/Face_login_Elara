@@ -58,14 +58,16 @@ class PID:
         Returns:
             Angle delta in degrees to add to the current servo position.
         """
-        # Deadband — ignore tiny errors so the mount doesn't chase noise
-        if abs(error) <= self.deadband:
-            error = 0.0
-
         now = time.monotonic()
         dt  = (now - self._prev_time) if self._prev_time is not None else 0.033
         dt  = max(dt, 1e-4)          # guard division by zero on first tick
         self._prev_time = now
+
+        # Deadband — return zero without touching _prev_error so re-entry
+        # doesn't produce a derivative spike that kicks the servo back out.
+        if abs(error) <= self.deadband:
+            self._prev_error = 0.0   # bleed prev toward zero smoothly
+            return 0.0
 
         # Proportional
         p = self.kp * error
