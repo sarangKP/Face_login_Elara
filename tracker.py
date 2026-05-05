@@ -33,6 +33,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 
+import config
 from pid   import PID
 from servo import ServoController, SIMULATE, PAN_CENTER, TILT_CENTER
 
@@ -104,22 +105,22 @@ class CameraManager:
         if "/usr/lib/python3/dist-packages" not in sys.path:
             sys.path.append("/usr/lib/python3/dist-packages")
 
-        # 1. Try Pi camera module
-        try:
-            from picamera2 import Picamera2
-            self._picam = Picamera2()
-            config = self._picam.create_preview_configuration(
-                main={"size": (640, 480), "format": "RGB888"}
-            )
-            self._picam.configure(config)
-            self._picam.start()
-            self.source = "picamera2"
-            log.info("CameraManager: picamera2 opened (640×480 RGB)")
-            threading.Thread(target=self._capture_loop, daemon=True, name="CamCapture").start()
-            return
-        except Exception as e:
-            log.warning("picamera2 failed: %s", e)  # ← add this
-            pass
+        # 1. Try Pi camera module (skip in laptop mode)
+        if config.IS_PI:
+            try:
+                from picamera2 import Picamera2
+                self._picam = Picamera2()
+                cam_cfg = self._picam.create_preview_configuration(
+                    main={"size": (640, 480), "format": "RGB888"}
+                )
+                self._picam.configure(cam_cfg)
+                self._picam.start()
+                self.source = "picamera2"
+                log.info("CameraManager: picamera2 opened (640×480)")
+                threading.Thread(target=self._capture_loop, daemon=True, name="CamCapture").start()
+                return
+            except Exception as e:
+                log.warning("picamera2 failed: %s", e)
 
         # 2. Browser-feed mode — browser owns the webcam via getUserMedia.
         #    On a laptop there is only one camera. If the server opens it with
@@ -137,7 +138,18 @@ class CameraManager:
             frame = None
             try:
                 if self._picam:
-                    frame = self._picam.capture_array()
+                    # libcamera's "RGB888" actually returns bytes in B,G,R order
+                    # (libcamera names formats by byte order, OpenCV by channel
+                    # order). Without this convert, reds/blues are swapped on
+                    # the stream and any RGB-expecting code sees wrong colours.
+                    raw = self._picam.capture_array()
+                    frame = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
+                    if config.MIRROR_PI_FRAME:
+                        # Match the laptop browser-feed path (which mirrors in
+                        # JS before POSTing). Without mirroring, the PID error
+                        # sign is inverted and the servo chases away from the
+                        # face instead of toward it.
+                        frame = cv2.flip(frame, 1)
                 elif self._cap:
                     ok, bgr = self._cap.read()
                     if ok:

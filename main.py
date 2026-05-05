@@ -16,6 +16,7 @@ import cv2
 from pathlib import Path
 from typing import List
 
+import config
 from tracker import FaceTracker, CameraManager
 
 # ── Tracker (started/stopped with the server) ─────────────────────────────────
@@ -284,6 +285,64 @@ async def track_feed(req: LoginRequest):
 async def track_source():
     """Returns which camera source the tracker is using."""
     return {"source": CameraManager().source}
+
+
+@app.get("/config")
+async def get_config():
+    """Tells the frontend how to behave (pi-camera vs browser webcam)."""
+    return {
+        "mode":   config.MODE,
+        "is_pi":  config.IS_PI,
+        "source": CameraManager().source,
+    }
+
+
+@app.get("/camera/stream")
+async def camera_stream():
+    """
+    Raw MJPEG stream straight from the camera (no tracker overlay).
+    Independent of FaceTracker — works even when tracking is disabled.
+    Used by the login page preview.
+    """
+    cam = CameraManager()
+
+    async def generate():
+        while True:
+            frame = cam.get_frame()
+            if frame is not None:
+                _, buf = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, 80],
+                )
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+                )
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/camera/frame")
+async def camera_frame():
+    """
+    Latest raw (un-annotated) frame from the active camera as a JPEG.
+    Used by the login page in Pi mode to capture from the Pi camera.
+    """
+    cam = CameraManager()
+    frame = cam.get_frame()
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No frame available yet")
+    _, buf = cv2.imencode(
+        ".jpg",
+        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+        [cv2.IMWRITE_JPEG_QUALITY, 88],
+    )
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
 @app.get("/debug/last-frame")

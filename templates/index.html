@@ -234,6 +234,7 @@
     <!-- Camera feed -->
     <div class="cam-wrap">
       <video id="video" autoplay playsinline muted></video>
+      <img    id="pi-feed" alt="pi camera" style="display:none;width:100%;height:100%;object-fit:cover"/>
       <canvas id="canvas" style="display:none"></canvas>
       <div class="oval-overlay"><div class="oval" id="oval"></div></div>
       <div class="arrow-hint left"  id="arr-left">←</div>
@@ -291,15 +292,37 @@
 
   // ── Camera ──────────────────────────────────────────────────────────────────
   const video  = document.getElementById('video');
+  const piFeed = document.getElementById('pi-feed');
   const canvas = document.getElementById('canvas');
   const ctx    = canvas.getContext('2d');
 
-  navigator.mediaDevices.getUserMedia({ video: { width:640, height:480, facingMode:'user' }, audio:false })
-    .then(s => { video.srcObject = s; })
-    .catch(() => showStatus('error', 'Camera unavailable'));
+  // Mode: 'pi' uses the server's pi camera, 'laptop' uses browser webcam.
+  // Set by /config on load. Defaults to laptop until /config replies.
+  let CAMERA_MODE = 'laptop';
+
+  async function initCamera() {
+    let cfg = { mode: 'laptop', is_pi: false };
+    try {
+      const r = await fetch('/config');
+      cfg = await r.json();
+    } catch (_) {}
+    CAMERA_MODE = cfg.is_pi ? 'pi' : 'laptop';
+
+    if (CAMERA_MODE === 'pi') {
+      // Show the server's annotated pi-camera stream; no browser webcam needed.
+      video.style.display  = 'none';
+      piFeed.style.display = 'block';
+      piFeed.src = '/camera/stream';
+    } else {
+      navigator.mediaDevices.getUserMedia({ video: { width:640, height:480, facingMode:'user' }, audio:false })
+        .then(s => { video.srcObject = s; })
+        .catch(() => showStatus('error', 'Camera unavailable'));
+    }
+  }
+  initCamera();
 
   // ── Capture helpers ─────────────────────────────────────────────────────────
-  function captureFrame(quality = JPEG_QUALITY) {
+  function captureFrameLaptop(quality) {
     const W = video.videoWidth  || 640;
     const H = video.videoHeight || 480;
     let dW = W, dH = H;
@@ -310,6 +333,25 @@
     ctx.drawImage(video, -dW, 0, dW, dH);
     ctx.restore();
     return canvas.toDataURL('image/jpeg', quality);
+  }
+
+  // Pi mode: fetch the latest raw camera frame from the server and return it
+  // as a data URL — same shape the /login and /register endpoints expect.
+  async function captureFramePi() {
+    const r = await fetch('/camera/frame', { cache: 'no-store' });
+    if (!r.ok) throw new Error('camera frame unavailable');
+    const blob = await r.blob();
+    return await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload  = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  async function captureFrame(quality = JPEG_QUALITY) {
+    if (CAMERA_MODE === 'pi') return captureFramePi();
+    return captureFrameLaptop(quality);
   }
 
   function triggerFlash() {
@@ -342,7 +384,7 @@
     btn.disabled = true;
     showStatus('info', 'Scanning…');
     try {
-      const image = captureFrame();
+      const image = await captureFrame();
       const res  = await fetch('/login', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ image })
@@ -447,7 +489,7 @@
     }
   }
 
-  function captureStep() {
+  async function captureStep() {
     if (!registering) return;
 
     // hide countdown
@@ -459,7 +501,13 @@
     triggerFlash();
     setTimeout(() => oval.classList.remove('capturing'), 600);
 
-    capturedFrames.push(captureFrame());
+    try {
+      capturedFrames.push(await captureFrame());
+    } catch (e) {
+      showStatus('error', 'Capture failed: ' + e.message);
+      cancelRegistration();
+      return;
+    }
     currentStep++;
 
     if (currentStep < STEPS.length) {

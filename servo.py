@@ -22,10 +22,12 @@ import threading
 import logging
 import glob
 
+import config
+
 log = logging.getLogger(__name__)
 
-# ── Toggle this one flag to go live ──────────────────────────────────────────
-SIMULATE = False          # False → real ESP32 serial control
+# Laptop mode → simulate (no ESP32 attached). Pi mode → drive real servos.
+SIMULATE = config.IS_LAPTOP
 
 # ── Serial port ──────────────────────────────────────────────────────────────
 # Set explicitly or leave as None to auto-detect the first ttyUSB*/ttyACM*
@@ -69,7 +71,16 @@ class ServoController:
         self._serial = None
 
         if not simulate:
-            self._init_serial()
+            try:
+                self._init_serial()
+            except Exception as e:
+                # No ESP32 attached → degrade to simulate so tracking can still
+                # run (camera + face detection + virtual angle state). Servos
+                # will simply not move; the rest of the system is unaffected.
+                log.warning("ServoController: serial unavailable (%s) — "
+                            "falling back to simulate mode.", e)
+                self.simulate = True
+                self._serial = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
