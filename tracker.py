@@ -54,10 +54,10 @@ DEADBAND_PX = 15          # pixel radius around centre — no servo move inside 
 # If tracking is sluggish → increase kp slightly (e.g. 0.07 → 0.10).
 # If mount oscillates  → increase kd (e.g. 0.003 → 0.006).
 # Ki = 0 intentionally — add only after physical testing (integral windup hunts).
-PAN_PID_GAINS  = dict(kp=0.07, ki=0.0, kd=0.003,
-                      output_limits=(-8.0,  8.0),  deadband=DEADBAND_PX)
-TILT_PID_GAINS = dict(kp=0.07, ki=0.0, kd=0.003,
-                      output_limits=(-6.0,  6.0),  deadband=DEADBAND_PX)
+PAN_PID_GAINS  = dict(kp=0.03, ki=0.0, kd=0.002,
+                      output_limits=(-5.0,  5.0),  deadband=DEADBAND_PX)
+TILT_PID_GAINS = dict(kp=0.03, ki=0.0, kd=0.002,
+                      output_limits=(-4.0,  4.0),  deadband=DEADBAND_PX)
 
 TARGET_FPS = 20           # tracker loop rate (frames processed per second)
 
@@ -227,6 +227,9 @@ class FaceTracker:
         self._no_face_count = 0
         self._NO_FACE_RESET = 10   # reset PIDs after this many missed frames
 
+        self._last_face_time = time.monotonic()
+        self._NO_FACE_CENTER_S = 3.0   # seconds before returning to centre
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -282,6 +285,7 @@ class FaceTracker:
 
             if face_box is not None:
                 self._no_face_count = 0
+                self._last_face_time = time.monotonic()
                 fx, fy, fw, fh = face_box
                 face_cx = fx + fw // 2
                 face_cy = fy + fh // 2
@@ -310,9 +314,10 @@ class FaceTracker:
                 err_x = err_y = 0.0
                 self._no_face_count += 1
                 if self._no_face_count >= self._NO_FACE_RESET:
-                    # Reset integral so there's no kick when face reappears
                     self._pan_pid.reset()
                     self._tilt_pid.reset()
+                if time.monotonic() - self._last_face_time >= self._NO_FACE_CENTER_S:
+                    self._servo.center()
 
             # Measure loop FPS
             now  = time.monotonic()
