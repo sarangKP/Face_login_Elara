@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/usr/lib/python3/dist-packages")
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, Response, StreamingResponse

@@ -100,6 +100,10 @@ class CameraManager:
         self._picam        = None
         self._running      = True
 
+        import sys
+        if "/usr/lib/python3/dist-packages" not in sys.path:
+            sys.path.append("/usr/lib/python3/dist-packages")
+
         # 1. Try Pi camera module
         try:
             from picamera2 import Picamera2
@@ -113,7 +117,8 @@ class CameraManager:
             log.info("CameraManager: picamera2 opened (640×480 RGB)")
             threading.Thread(target=self._capture_loop, daemon=True, name="CamCapture").start()
             return
-        except Exception:
+        except Exception as e:
+            log.warning("picamera2 failed: %s", e)  # ← add this
             pass
 
         # 2. Browser-feed mode — browser owns the webcam via getUserMedia.

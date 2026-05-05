@@ -11,7 +11,7 @@ dependencies = [
     "opencv-python>=4.13.0.92",
     "pyserial>=3.5",
     "python-multipart>=0.0.26",
-    "setuptools>=82.0.1",
+    "setuptools<67",
     "uvicorn[standard]>=0.45.0",
 ]
 
