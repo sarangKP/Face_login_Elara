@@ -9,6 +9,7 @@ dependencies = [
     "face-recognition-models",
     "fastapi>=0.136.0",
     "opencv-python>=4.13.0.92",
+    "pyserial>=3.5",
     "python-multipart>=0.0.26",
     "setuptools>=82.0.1",
     "uvicorn[standard]>=0.45.0",

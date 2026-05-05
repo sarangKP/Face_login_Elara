@@ -1,75 +1,64 @@
 """
 Servo abstraction — identical public API for real hardware and simulation.
 
-To go live:
-  1. Set SIMULATE = False
-  2. Wire pan servo  signal wire → BCM GPIO 17
-     Wire tilt servo signal wire → BCM GPIO 18
-     (Power servos from a separate 5 V supply, not the Pi 3.3 V pin)
-  3. Install lgpio: pip install lgpio
-  4. Restart the service — no daemon needed
+Hardware path: Python → USB serial → ESP32 → PWM → servos
+  1. Flash esp32_servo/ with PlatformIO (open esp32_servo/ folder → Upload)
+  2. Wire pan  servo signal → ESP32 GPIO 13
+     Wire tilt servo signal → ESP32 GPIO 12
+     Power servos from a separate 5 V supply, not the ESP32 3.3 V pin
+  3. Install pyserial: uv add pyserial   (or: pip install pyserial)
+  4. Set SIMULATE = False and set SERIAL_PORT to your device, then run
 
-Why lgpio, not pigpio or RPi.GPIO?
-───────────────────────────────────
-Pi 5 uses the RP1 southbridge chip for all GPIO. Neither pigpio nor RPi.GPIO
-has a driver for RP1 — both fail silently or crash on Pi 5.
+Finding the ESP32 port on Linux:
+  ls /dev/ttyUSB*   # CP2102 / CH340 adapters
+  ls /dev/ttyACM*   # native USB CDC (rare on ESP32 DevKit)
+  dmesg | tail -20  # check kernel message after plugging in
 
-lgpio is the Pi Foundation's official replacement:
-  • Works on Pi 1 through Pi 5 (RP1 aware)
-  • No background daemon required (unlike pigpio which needs `sudo pigpiod`)
-  • Provides tx_pwm() — software-timed PWM accurate enough for 50 Hz servos
-  • Install: pip install lgpio   (or: sudo apt install python3-lgpio)
-
-For absolute precision (hardware PWM):
-  If you need rock-solid pulse widths (e.g. industrial servos), use GPIO 12
-  or GPIO 13 which have dedicated hardware PWM on all Pi models. Access via
-  /sys/class/pwm (sysfs). lgpio software PWM is fine for SG90/MG996R servos.
+Protocol sent to ESP32 over serial (115200 baud, newline-terminated):
+  "P<pan_deg> T<tilt_deg>\n"   e.g. "P105.3 T72.0\n"
 """
+
 import threading
 import logging
+import glob
 
 log = logging.getLogger(__name__)
 
 # ── Toggle this one flag to go live ──────────────────────────────────────────
-SIMULATE = True          # False → real lgpio servo control
+SIMULATE = False          # False → real ESP32 serial control
 
-# ── GPIO (BCM numbering) ─────────────────────────────────────────────────────
-PAN_PIN  = 17            # horizontal servo  (BCM 17 = physical pin 11)
-TILT_PIN = 18            # vertical servo    (BCM 18 = physical pin 12)
+# ── Serial port ──────────────────────────────────────────────────────────────
+# Set explicitly or leave as None to auto-detect the first ttyUSB*/ttyACM*
+SERIAL_PORT: str | None = None
+BAUD_RATE = 115200
 
 # ── Servo geometry ────────────────────────────────────────────────────────────
-PAN_CENTER  = 90.0       # degrees — home / resting position
+PAN_CENTER  = 90.0
 TILT_CENTER = 90.0
 
-PAN_LIMITS  = (30.0, 150.0)   # physical safe range — adjust for your bracket
-TILT_LIMITS = (40.0, 140.0)   # narrower tilt to protect the camera ribbon cable
-
-# ── PWM parameters ────────────────────────────────────────────────────────────
-_SERVO_HZ  = 50          # standard servo PWM frequency (50 Hz = 20 ms period)
-_PERIOD_US = 1_000_000 / _SERVO_HZ   # 20 000 µs
-
-# Standard servo pulse range — measure your servo if behaviour is off
-_PW_MIN_US = 500.0       # µs → 0°
-_PW_MAX_US = 2500.0      # µs → 180°
+PAN_LIMITS  = (30.0, 150.0)
+TILT_LIMITS = (40.0, 140.0)
 
 
-def _angle_to_duty(angle: float) -> float:
-    """
-    Convert servo angle (degrees) → lgpio PWM duty cycle (0.0–100.0 %).
-
-    lgpio tx_pwm() takes a percentage, not a raw pulse width.
-    duty = pulse_width_µs / period_µs × 100
-    """
-    pw_us = _PW_MIN_US + (angle / 180.0) * (_PW_MAX_US - _PW_MIN_US)
-    return (pw_us / _PERIOD_US) * 100.0   # e.g. 1500 µs → 7.5 %
+def _find_port() -> str:
+    """Return the first available ESP32-like serial port on Linux."""
+    for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+        ports = sorted(glob.glob(pattern))
+        if ports:
+            return ports[0]
+    raise RuntimeError(
+        "No ESP32 serial port found.\n"
+        "Plug in the ESP32, then check: ls /dev/ttyUSB* /dev/ttyACM*\n"
+        "If permission denied: sudo usermod -aG dialout $USER  (then re-login)"
+    )
 
 
 class ServoController:
     """
     Thread-safe servo controller.
 
-    Real mode : sends 50 Hz PWM via lgpio (Pi 5 compatible, no daemon needed)
-    Sim mode  : tracks angle state only — zero GPIO calls
+    Real mode : sends angle commands over USB serial to the ESP32 firmware.
+    Sim mode  : tracks angle state only — no serial port opened.
     """
 
     def __init__(self, simulate: bool = SIMULATE):
@@ -77,10 +66,10 @@ class ServoController:
         self._pan   = PAN_CENTER
         self._tilt  = TILT_CENTER
         self._lock  = threading.Lock()
-        self._handle = None          # lgpio chip handle
+        self._serial = None
 
         if not simulate:
-            self._init_lgpio()
+            self._init_serial()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -100,54 +89,48 @@ class ServoController:
         with self._lock:
             self._pan  = pan
             self._tilt = tilt
-            if not self.simulate and self._handle is not None:
-                self._write(PAN_PIN,  pan)
-                self._write(TILT_PIN, tilt)
+            if not self.simulate and self._serial is not None:
+                self._write(pan, tilt)
 
     def center(self) -> None:
         """Return both servos to the home position."""
         self.move(PAN_CENTER, TILT_CENTER)
 
     def shutdown(self) -> None:
-        """
-        Centre servos then stop PWM so they de-energise at rest.
-        Leaving PWM active keeps the motor holding torque — wastes power,
-        generates heat, and wears out plastic gears over time.
-        """
-        if self._handle is not None:
-            import lgpio
+        """Centre servos then close the serial port."""
+        if self._serial is not None:
             self.center()
-            # duty=0 → no pulses → servo de-energises
-            lgpio.tx_pwm(self._handle, PAN_PIN,  _SERVO_HZ, 0)
-            lgpio.tx_pwm(self._handle, TILT_PIN, _SERVO_HZ, 0)
-            lgpio.gpiochip_close(self._handle)
-            self._handle = None
-            log.info("ServoController: lgpio closed, PWM stopped.")
+            import time; time.sleep(0.3)   # let the ESP32 finish the move
+            self._serial.close()
+            self._serial = None
+            log.info("ServoController: serial port closed.")
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _init_lgpio(self) -> None:
+    def _init_serial(self) -> None:
         try:
-            import lgpio
+            import serial
         except ImportError:
             raise ImportError(
-                "lgpio not installed.\n"
-                "Run: pip install lgpio\n"
-                "Or:  sudo apt install python3-lgpio"
+                "pyserial not installed.\n"
+                "Run: uv add pyserial   or   pip install pyserial"
             )
 
-        self._handle = lgpio.gpiochip_open(0)   # /dev/gpiochip0
+        port = SERIAL_PORT or _find_port()
+        self._serial = serial.Serial(port, BAUD_RATE, timeout=2)
 
-        # Claim both pins as outputs before starting PWM
-        lgpio.gpio_claim_output(self._handle, PAN_PIN)
-        lgpio.gpio_claim_output(self._handle, TILT_PIN)
+        import time; time.sleep(2)      # wait for ESP32 reset after DTR toggle
 
-        # Centre on startup — prevents the mount snapping to a random angle
-        self._write(PAN_PIN,  PAN_CENTER)
-        self._write(TILT_PIN, TILT_CENTER)
-        log.info("ServoController: lgpio opened — servos centred (Pi 5 compatible).")
+        # Drain the "READY" banner sent by the firmware
+        self._serial.reset_input_buffer()
 
-    def _write(self, pin: int, angle: float) -> None:
-        import lgpio
-        duty = _angle_to_duty(angle)
-        lgpio.tx_pwm(self._handle, pin, _SERVO_HZ, duty)
+        self._write(PAN_CENTER, TILT_CENTER)
+        log.info("ServoController: connected to ESP32 on %s — servos centred.", port)
+
+    def _write(self, pan: float, tilt: float) -> None:
+        """Send one command frame. Caller must hold self._lock."""
+        cmd = f"P{pan:.1f} T{tilt:.1f}\n"
+        try:
+            self._serial.write(cmd.encode())
+        except Exception as exc:
+            log.warning("ServoController serial write error: %s", exc)
