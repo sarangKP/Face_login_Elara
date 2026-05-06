@@ -30,8 +30,11 @@ import config
 
 log = logging.getLogger(__name__)
 
-# Laptop mode → simulate (no ESP32 attached). Pi mode → drive real servos.
-SIMULATE = config.IS_LAPTOP
+# Always try to drive real servos. If no ESP32 is attached, _init_serial()
+# raises and ServoController falls back to simulate mode automatically — so
+# laptop-without-hardware still works, and laptop-with-hardware just works.
+SIMULATE = False
+
 
 # ── Serial port ──────────────────────────────────────────────────────────────
 # Set explicitly or leave as None to auto-detect the first ttyUSB*/ttyACM*
