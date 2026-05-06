@@ -15,6 +15,11 @@ Why Haar Cascade for tracking (not face_recognition)?
   Haar Cascade at 320×240: ~10-30 ms/frame on Pi 5 — smooth 20+ fps tracking.
   We only need the bounding box here, not identity.
 
+Tuning
+──────
+All tunable parameters (PID gains, dead zone, slew rate, FPS) live in
+config.py — edit them there, no need to touch this file.
+
 Usage (from FastAPI lifespan)
 ─────────────────────────────
     tracker = FaceTracker()
@@ -48,19 +53,25 @@ SCALE_FACTOR    = 1.15    # pyramid scale per step; smaller = slower but finds m
 MIN_NEIGHBOURS  = 4       # higher = fewer false positives, may miss quick moves
 MIN_FACE_PX     = 40      # ignore detections smaller than this (noise, background)
 
-DEADBAND_PX = 20          # pixel radius around centre — no servo move inside this zone
+# ── Pull all tuning knobs from config.py ──────────────────────────────────────
+DEAD_ZONE_PX = config.DEAD_ZONE_PX
 
-# ── PID gains ─────────────────────────────────────────────────────────────────
-# Tuned for SG90/MG996R on Pi 5 via ESP32 serial.
-# If tracking is sluggish → increase kp (e.g. 0.025 → 0.04).
-# If mount oscillates    → increase kd (e.g. 0.006 → 0.010) or reduce kp.
-# Ki = 0 intentionally — add only after Kp/Kd are stable on real hardware.
-PAN_PID_GAINS  = dict(kp=0.025, ki=0.0, kd=0.006,
-                      output_limits=(-5.0,  5.0),  deadband=DEADBAND_PX)
-TILT_PID_GAINS = dict(kp=0.025, ki=0.0, kd=0.006,
-                      output_limits=(-4.0,  4.0),  deadband=DEADBAND_PX)
+PAN_PID_GAINS  = dict(
+    kp=config.PID_KP,
+    ki=config.PID_KI,
+    kd=config.PID_KD,
+    output_limits=(-config.PID_OUTPUT_LIMIT_PAN,  config.PID_OUTPUT_LIMIT_PAN),
+    deadband=DEAD_ZONE_PX,
+)
+TILT_PID_GAINS = dict(
+    kp=config.PID_KP,
+    ki=config.PID_KI,
+    kd=config.PID_KD,
+    output_limits=(-config.PID_OUTPUT_LIMIT_TILT, config.PID_OUTPUT_LIMIT_TILT),
+    deadband=DEAD_ZONE_PX,
+)
 
-TARGET_FPS = 20           # tracker loop rate (frames processed per second)
+TARGET_FPS = config.TARGET_FPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +179,9 @@ class CameraManager:
         """
         Accept a frame from an external source (browser POST /track/feed).
         Works in any mode — also lets the browser override hardware in a pinch.
+
+        In laptop mode the browser mirrors the webcam in JS before POSTing,
+        so frames arrive already horizontally flipped — no extra flip needed.
         """
         with self._frame_lock:
             self._latest_frame = frame
@@ -424,6 +438,7 @@ class FaceTracker:
         """
         Draw tracking information on the frame:
           • Crosshair at frame centre (target)
+          • Dead zone circle — servo ignores errors inside this ring
           • Face bounding box + centre dot
           • Error vector (line from frame centre to face centre)
           • Pixel error labels
@@ -437,11 +452,15 @@ class FaceTracker:
         RED    = (255,  70,  70)
         WHITE  = (255, 255, 255)
         GRAY   = (110, 110, 110)
+        BLUE   = (80,  150, 255)
 
         # ── Centre crosshair ──
         cv2.line(frame, (cx - 22, cy), (cx + 22, cy), GRAY, 1)
         cv2.line(frame, (cx, cy - 22), (cx, cy + 22), GRAY, 1)
         cv2.circle(frame, (cx, cy), 3, GRAY, -1)
+
+        # ── Dead zone ring — visual indicator of the no-move zone ──
+        cv2.circle(frame, (cx, cy), DEAD_ZONE_PX, BLUE, 1)
 
         if face_box is not None:
             fx, fy, fw, fh = face_box

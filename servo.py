@@ -16,6 +16,10 @@ Finding the ESP32 port on Linux:
 
 Protocol sent to ESP32 over serial (115200 baud, newline-terminated):
   "P<pan_deg> T<tilt_deg>\n"   e.g. "P105.3 T72.0\n"
+
+Tuning
+──────
+SLEW_MAX_DEG is read from config.py — change it there.
 """
 
 import threading
@@ -41,6 +45,9 @@ TILT_CENTER = 90.0
 PAN_LIMITS  = (30.0, 150.0)
 TILT_LIMITS = (40.0, 140.0)
 
+# Slew rate — read from config so it's tunable from one place
+SLEW_MAX_DEG: float = config.SLEW_MAX_DEG
+
 
 def _find_port() -> str:
     """Return the first available ESP32-like serial port on Linux."""
@@ -61,6 +68,10 @@ class ServoController:
 
     Real mode : sends angle commands over USB serial to the ESP32 firmware.
     Sim mode  : tracks angle state only — no serial port opened.
+
+    In both modes move() applies a slew rate limit (SLEW_MAX_DEG per call)
+    so the servo never jumps more than a small increment per tracker tick,
+    regardless of how large the PID output happens to be.
     """
 
     def __init__(self, simulate: bool = SIMULATE):
@@ -93,7 +104,23 @@ class ServoController:
         return self._tilt
 
     def move(self, pan: float, tilt: float) -> None:
-        """Move both axes to the given angles, clamped to safe limits."""
+        """
+        Move both axes toward the given angles, slew-rate limited.
+
+        Two-stage clamping:
+          1. Slew limit  — requested angle must be within ±SLEW_MAX_DEG of the
+                           current position. Prevents violent jumps even if the
+                           PID produces a large delta in a single tick.
+          2. Hard limits — clamp to the safe mechanical travel range.
+
+        Works identically in simulate and real modes — in simulate mode the
+        slew just constrains the virtual angle state shown in the HUD/compass.
+        """
+        # Stage 1 — slew rate: never move more than SLEW_MAX_DEG per call
+        pan  = max(self._pan  - SLEW_MAX_DEG, min(self._pan  + SLEW_MAX_DEG, pan))
+        tilt = max(self._tilt - SLEW_MAX_DEG, min(self._tilt + SLEW_MAX_DEG, tilt))
+
+        # Stage 2 — mechanical limits
         pan  = max(PAN_LIMITS[0],  min(PAN_LIMITS[1],  pan))
         tilt = max(TILT_LIMITS[0], min(TILT_LIMITS[1], tilt))
 
@@ -104,8 +131,16 @@ class ServoController:
                 self._write(pan, tilt)
 
     def center(self) -> None:
-        """Return both servos to the home position."""
-        self.move(PAN_CENTER, TILT_CENTER)
+        """Return both servos to the home position (bypasses slew rate)."""
+        # Bypass slew for centering — immediate hard return on stop/shutdown,
+        # not a slow crawl back to centre after tracking ends.
+        pan  = max(PAN_LIMITS[0],  min(PAN_LIMITS[1],  PAN_CENTER))
+        tilt = max(TILT_LIMITS[0], min(TILT_LIMITS[1], TILT_CENTER))
+        with self._lock:
+            self._pan  = pan
+            self._tilt = tilt
+            if not self.simulate and self._serial is not None:
+                self._write(pan, tilt)
 
     def shutdown(self) -> None:
         """Centre servos then close the serial port."""
