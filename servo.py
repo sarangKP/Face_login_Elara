@@ -7,7 +7,7 @@ Hardware path: Python → USB serial → ESP32 → PWM → servos
      Wire tilt servo signal → ESP32 GPIO 12
      Power servos from a separate 5 V supply, not the ESP32 3.3 V pin
   3. Install pyserial: uv add pyserial   (or: pip install pyserial)
-  4. Set SIMULATE = False and set SERIAL_PORT to your device, then run
+  4. Run with DEVICE_MODE=pi (or on Pi hardware — auto-detected)
 
 Finding the ESP32 port on Linux:
   ls /dev/ttyUSB*   # CP2102 / CH340 adapters
@@ -116,15 +116,15 @@ class ServoController:
         Works identically in simulate and real modes — in simulate mode the
         slew just constrains the virtual angle state shown in the HUD/compass.
         """
-        # Stage 1 — slew rate: never move more than SLEW_MAX_DEG per call
-        pan  = max(self._pan  - SLEW_MAX_DEG, min(self._pan  + SLEW_MAX_DEG, pan))
-        tilt = max(self._tilt - SLEW_MAX_DEG, min(self._tilt + SLEW_MAX_DEG, tilt))
-
-        # Stage 2 — mechanical limits
-        pan  = max(PAN_LIMITS[0],  min(PAN_LIMITS[1],  pan))
-        tilt = max(TILT_LIMITS[0], min(TILT_LIMITS[1], tilt))
-
         with self._lock:
+            # Stage 1 — slew rate: never move more than SLEW_MAX_DEG per call
+            pan  = max(self._pan  - SLEW_MAX_DEG, min(self._pan  + SLEW_MAX_DEG, pan))
+            tilt = max(self._tilt - SLEW_MAX_DEG, min(self._tilt + SLEW_MAX_DEG, tilt))
+
+            # Stage 2 — mechanical limits
+            pan  = max(PAN_LIMITS[0],  min(PAN_LIMITS[1],  pan))
+            tilt = max(TILT_LIMITS[0], min(TILT_LIMITS[1], tilt))
+
             self._pan  = pan
             self._tilt = tilt
             if not self.simulate and self._serial is not None:
