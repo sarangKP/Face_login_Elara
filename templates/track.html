@@ -42,9 +42,9 @@
       flex-shrink: 0;
       transition: background 0.3s;
     }
-    .dot.live   { background: #10b981; box-shadow: 0 0 6px #10b981; animation: blink 1.5s infinite; }
+    .dot.live    { background: #10b981; box-shadow: 0 0 6px #10b981; animation: blink 1.5s infinite; }
     .dot.no-face { background: #f59e0b; }
-    .dot.error  { background: #ef4444; }
+    .dot.error   { background: #ef4444; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
 
     /* ── Main layout ─────────────────────────────────── */
@@ -321,9 +321,7 @@
     document.getElementById('welcome-name').textContent = `— ${_name}`;
     document.title = `Tracking ${_name} — Elara`;
   }
-  // If someone lands here without logging in, bounce back
   if (!_token) {
-    // Allow direct navigation during dev — just warn
     console.warn('No login token — access via the login page in production.');
   }
 
@@ -385,7 +383,6 @@
 
     const R = CR - 20;
 
-    // Pan needle (horizontal, blue)
     const panN  = (pan  - 90) / ((PAN_MAX  - PAN_MIN)  / 2);
     const tiltN = (tilt - 90) / ((TILT_MAX - TILT_MIN) / 2);
     const px = CR + panN  * R;
@@ -426,7 +423,6 @@
     el.className = 'entry ' + cls;
     el.textContent = `${now}  ${msg}`;
     log.prepend(el);
-    // Keep last 40 lines
     while (log.children.length > 40) log.removeChild(log.lastChild);
   }
 
@@ -440,7 +436,7 @@
       const dot = document.getElementById('status-dot');
       dot.className = 'dot ' + (data.face_found ? 'live' : 'no-face');
 
-      // Gauges
+      // Servo gauges — always update
       const panPct  = ((data.pan  - PAN_MIN)  / (PAN_MAX  - PAN_MIN))  * 100;
       const tiltPct = ((data.tilt - TILT_MIN) / (TILT_MAX - TILT_MIN)) * 100;
       document.getElementById('pan-fill').style.width  = panPct  + '%';
@@ -448,7 +444,13 @@
       document.getElementById('pan-val').textContent   = data.pan.toFixed(1)  + '°';
       document.getElementById('tilt-val').textContent  = data.tilt.toFixed(1) + '°';
 
-      // Error offset
+      // FPS + Mode — always update (was inside face_found block before, which
+      // meant they stayed at "—" whenever no face was visible)
+      document.getElementById('fps-val').textContent  = data.fps.toFixed(0);
+      document.getElementById('mode-val').textContent = data.simulate ? 'SIM' : 'LIVE';
+
+      // Error offset — show values when face found, show 0 when no face
+      // (was only updating when face_found, leaving stale "—" otherwise)
       const ex = document.getElementById('err-x');
       const ey = document.getElementById('err-y');
       if (data.face_found) {
@@ -457,20 +459,16 @@
         document.getElementById('err-x-box').classList.toggle('active', Math.abs(data.error_x) > 15);
         document.getElementById('err-y-box').classList.toggle('active', Math.abs(data.error_y) > 15);
       } else {
-        ex.textContent = '—';
-        ey.textContent = '—';
+        ex.textContent = '0px';
+        ey.textContent = '0px';
         document.getElementById('err-x-box').classList.remove('active');
         document.getElementById('err-y-box').classList.remove('active');
       }
 
-      // Stats
-      document.getElementById('fps-val').textContent  = data.fps.toFixed(0);
-      document.getElementById('mode-val').textContent = data.simulate ? 'SIM' : 'LIVE';
-
-      // Compass
+      // Compass — always update
       drawCompass(data.pan, data.tilt);
 
-      // Event log
+      // Event log — only log transitions
       if (prevFaceFound !== null && data.face_found !== prevFaceFound) {
         addLog(data.face_found ? 'Face acquired' : 'Face lost',
                data.face_found ? 'found' : 'lost');
@@ -513,10 +511,12 @@
   }
 
   async function sendFrame() {
+    if (bVideo.readyState < 2) return;   // video not ready yet — skip frame
     const w = bVideo.videoWidth  || 640;
     const h = bVideo.videoHeight || 480;
     bCanvas.width = w; bCanvas.height = h;
-    // Mirror back (undo CSS mirror so face detection gets correct orientation)
+    // Mirror the frame to undo the browser selfie-cam flip before sending to
+    // the server — face detection expects an unmirrored image
     bCtx.save();
     bCtx.scale(-1, 1);
     bCtx.drawImage(bVideo, -w, 0, w, h);
@@ -532,18 +532,23 @@
     } catch (_) {}
   }
 
-  // Check which source the server is using, start browser feed if needed
+  // Check which source the server is using and start browser feed if needed.
+  // Retries every second until the server responds — fixes the race condition
+  // where checkSource() fired before the tracker was fully initialised.
   async function checkSource() {
     try {
       const res  = await fetch('/track/source');
       const data = await res.json();
-      if (data.source === 'browser' && !feedInterval) {
-        startBrowserFeed();
-      } else if (data.source !== 'browser') {
+      if (data.source === 'browser') {
+        if (!feedInterval) startBrowserFeed();
+      } else {
         document.getElementById('source-badge').textContent =
           data.source === 'picamera2' ? '🎥 pi-camera' : '📷 webcam';
       }
-    } catch (_) {}
+    } catch (_) {
+      // Server not ready yet — retry in 1 s
+      setTimeout(checkSource, 1000);
+    }
   }
 
   checkSource();
