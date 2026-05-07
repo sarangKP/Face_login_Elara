@@ -76,8 +76,7 @@ PID_KI: float = 0.0
 
 # ── Output limits (degrees per tick = slew rate at PID level) ────────────────
 # Maximum angle delta the PID controller can request in a single tracker tick.
-# At 20 fps:  1.5 °/tick × 20 = 30 °/sec.  Previous default was 5 °/tick = 100 °/sec.
-# Increase if tracking feels laggy; decrease if it still feels jerky.
+# At 20 fps:  1.5 °/tick × 20 = 30 °/sec.
 PID_OUTPUT_LIMIT_PAN:  float = 1.5   # degrees / tick, pan axis
 PID_OUTPUT_LIMIT_TILT: float = 1.2   # degrees / tick, tilt axis (smaller range)
 
@@ -85,8 +84,30 @@ PID_OUTPUT_LIMIT_TILT: float = 1.2   # degrees / tick, tilt axis (smaller range)
 # Belt-and-suspenders: even if PID output_limits are increased, the servo
 # will never receive a command more than this many degrees from its current
 # position per move() call.
-# At 20 fps:  2.0 °/call × 20 = 40 °/sec max physical travel.
 SLEW_MAX_DEG: float = 2.0
 
 # ── Tracker loop rate ─────────────────────────────────────────────────────────
 TARGET_FPS: int = 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IDENTITY BRIDGE — face login ↔ tracker
+# ─────────────────────────────────────────────────────────────────────────────
+# After /login identifies a person, the tracker periodically re-runs face
+# recognition on whoever is currently in frame and labels the tracked face as
+# the identified person ("Alice") or "Unknown". Recognition is heavy (dlib
+# encoder ≈ 150–300 ms / face on Pi 5) so it runs in a background worker on a
+# slow cadence — tracking stays at TARGET_FPS regardless.
+
+# How often the recognition worker re-checks the current frame.
+# Lower = label updates faster, higher CPU.  Don't go below ~2 s on Pi 5,
+# successive encoder runs will start to overlap.
+IDENTITY_CHECK_INTERVAL_S: float = 3.0
+
+# Match threshold for face_recognition distance (lower = stricter).
+# Mirrors the value used by /login in main.py.
+IDENTITY_TOLERANCE: float = 0.50
+
+# Cap on how many faces we run the encoder over per recognition pass.
+# Protects Pi 5 against a frame full of people.
+IDENTITY_MAX_FACES: int = 5
