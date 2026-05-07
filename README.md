@@ -1,370 +1,238 @@
 # Face Login — Elara Service
 
-Stateless face recognition + pan-tilt face tracking microservice for the [Elara Service](https://github.com/sarangKP/Elara_service). Built with FastAPI, `face_recognition` (dlib ResNet-34), and OpenCV Haar cascade.
-
-Runs in two modes from the same codebase:
-
-- **Pi mode** — Raspberry Pi 5 with the Pi Camera Module and an ESP32-driven pan/tilt mount. Production target.
-- **Laptop mode** — your dev machine. Browser webcam for face login, simulated servos for tracking. No hardware needed.
-
-The mode is picked automatically (presence of `picamera2`) or forced via the `DEVICE_MODE` environment variable.
+A self-contained FastAPI microservice that runs on a Raspberry Pi 5 (or any laptop for dev). It handles face registration, face login, real-time pan-tilt servo tracking, and — after login — continuous identity verification so cloud agents always know who is in front of the camera.
 
 ---
 
-## User flow
+## What it does
 
 ```
-http://localhost:8765/          ← Register or login
-        ↓  face recognised
-http://localhost:8765/track     ← Live face tracking + pan-tilt mount
-        ↓  logout button
-http://localhost:8765/          ← Back to login
+Browser / cloud agent
+        │
+        │  POST /login  ──► face match → name + token
+        │                          │
+        │                          ▼
+        │               FaceTracker.set_identified_person("Alice")
+        │                          │
+        │  GET /track/person ◄──── │  (poll every N seconds — Channel 1)
+        │  GET /frames/current ◄── │  (raw JPEG + headers      — Channel 2)
+        │  GET /frames/event ◄──── │  (JSON + base64 JPEG      — Channel 2)
+        │  GET /frames/stream ◄─── │  (MJPEG stream            — Channel 2)
 ```
 
 ---
 
-## How it works
+## Architecture
 
-### Mode selection
+### Threads
 
-`config.py` exposes a single `MODE` constant resolved on import:
+| Thread | Rate | Job |
+|---|---|---|
+| `CamCapture` | ~120 fps | Reads picamera2 (Pi) or accepts browser POSTs; keeps `_latest_frame` fresh |
+| `FaceTracker` | 20 fps | Haar cascade → largest face → PID → servo move; writes `TrackerState` |
+| `FaceRecognition` | every 3 s | dlib encoder → compares against login encodings; labels tracked face; never blocks the 20 fps loop |
 
-| Source | Result |
-|--------|--------|
-| `DEVICE_MODE=pi` env var | force Pi mode |
-| `DEVICE_MODE=laptop` env var | force laptop mode |
-| unset, `picamera2` importable | auto → `pi` |
-| unset, `picamera2` not importable | auto → `laptop` |
+### Why two detectors?
 
-Everything downstream — which camera path opens, whether the servo controller talks to the ESP32 or simulates, which preview the login page shows — keys off this single flag.
+- **Haar Cascade** (tracking loop, 20 fps): ~10–30 ms/frame — fast enough for real-time servo control.
+- **dlib encoder via face_recognition** (recognition worker, every 3 s): ~150–300 ms/frame on Pi 5 — accurate enough for identity, too slow for tracking.
 
-### Face login
+### Camera modes
 
-1. **Register** — guided 5-step flow captures the user's face at different angles (center → left → right → up → tilt). Multiple encodings are stored per user for robust matching.
-2. **Login** — a single frame is compared against all stored encodings. The closest match wins, returned with a confidence score and a session token. The browser then redirects to `/track`.
+| Mode | How it works |
+|---|---|
+| `picamera2` (Pi) | libcamera stack; frame captured in background thread |
+| `browser` (laptop dev) | Browser posts frames via `POST /track/feed`; no hardware camera needed |
 
-The capture source is mode-aware:
-
-- **Laptop** → browser opens its webcam via `getUserMedia` and POSTs JPEGs to `/login`.
-- **Pi** → page shows `/camera/stream` (MJPEG straight from the Pi Camera) for preview, and pulls a single still from `/camera/frame` to submit to `/login`.
-
-### Face detection — Haar + dlib hybrid
-
-dlib's HOG detector (used internally by `face_recognition`) is strict and misses faces on many laptop webcams. The fix: use **Haar cascade** (fast, tolerant) to locate the face, then pass those coordinates directly to `face_recognition.face_encodings()` so dlib only computes the embedding — it never runs its own detection.
-
-```
-Haar cascade  →  face location (top, right, bottom, left)
-                          ↓
-face_recognition.face_encodings(img, known_face_locations=locs)
-                          ↓
-                  128-float embedding  →  stored / compared
-```
-
-### Under the hood — no training
-
-No model is trained on your machine. The full pipeline per frame:
-
-| Step | Algorithm | Trained by you? |
-|------|-----------|-----------------|
-| Face detection | Haar cascade (OpenCV) | No |
-| Face location → crop | Affine transform on 68 landmarks | No |
-| Embedding | Pre-trained ResNet-34 (ships in `face_recognition_models`) | No |
-| Matching | Euclidean distance < 0.5 threshold | No |
-
-`db.json` is not a model — it is a lookup table of 128-float vectors, one per registered face angle.
-
-### Face tracking
-
-After login, the tracking page runs a **20 fps PID loop**:
-
-```
-Camera frame → Haar detect face → compute X/Y pixel error from centre
-                                           ↓
-                                    PID controller
-                                           ↓
-                               pan angle += Δpan
-                               tilt angle += Δtilt
-                                           ↓
-                       USB serial → ESP32 → PWM → servos   (Pi)
-                       virtual angle state only            (laptop / no ESP32)
-```
-
-If the ESP32 is unreachable on Pi mode (`/dev/ttyUSB*`/`/dev/ttyACM*` not found), `ServoController` logs a warning and falls back to simulate mode automatically. The camera and PID loop keep working — only the physical move is suppressed.
-
-### Camera architecture — one camera, no conflicts
-
-A single `CameraManager` singleton owns the hardware camera for the lifetime of the server process. Two HTTP streams expose its frames:
-
-| Endpoint | Source | Used by |
-|----------|--------|---------|
-| `/camera/stream` | raw MJPEG, no overlay | Login page preview (Pi mode) |
-| `/track/stream` | annotated by `FaceTracker` | Tracking page |
-| `/camera/frame` | single raw JPEG | Login capture (Pi mode) |
-
-Login and tracking are otherwise decoupled — the login flow does not depend on the tracker thread being alive.
-
-```
-Pi mode:
-    picamera2 ──▶ CameraManager ──┬──▶ /camera/stream  (login preview)
-                                  ├──▶ /camera/frame   (login capture)
-                                  └──▶ FaceTracker ──▶ /track/stream
-
-Laptop mode:
-    Browser getUserMedia ──▶ /login           (face login, in-browser capture)
-                         ──▶ POST /track/feed (browser-feed for tracker)
-                                  └──▶ FaceTracker ──▶ /track/stream
-```
-
-### Pi camera quirks (handled)
-
-Two issues bite anyone using `picamera2` for the first time, both fixed inside `CameraManager._capture_loop`:
-
-1. **`RGB888` is actually BGR.** libcamera names pixel formats by *byte order*; OpenCV names them by *channel order*. The bytes returned for `format="RGB888"` are B, G, R — so without a `cv2.cvtColor(BGR2RGB)` reds and blues are swapped throughout the pipeline.
-2. **Pi camera isn't mirrored, browser webcams typically are.** The PID error sign was tuned against the laptop browser-feed path, which mirrors frames in JS before sending. To keep the same logic working on Pi, picamera2 frames are flipped horizontally (`config.MIRROR_PI_FRAME`). Without this, the mount chases the face the wrong way.
+`CameraManager` is a singleton — opened once, shared by the tracker and all frame endpoints.
 
 ---
 
-## Prerequisites
+## Setup
 
-- [uv](https://docs.astral.sh/uv/) package manager
-- **Python 3.12** (see note below on 3.13+)
-- `cmake` for building dlib:
-  ```bash
-  sudo apt install cmake build-essential
-  ```
-
-### Python version note
-
-`face_recognition` depends on `face_recognition_models`, which uses `pkg_resources` from `setuptools`. In **Python 3.13+** `pkg_resources` is no longer bundled.
-
-**Recommended: use Python 3.12** — already the default on Raspberry Pi OS Bookworm.
+**Requirements:** Python ≥ 3.12, `uv`
 
 ```bash
-echo "3.12" > .python-version
-# In pyproject.toml: requires-python = ">=3.12"
-uv sync
-```
-
-**If you must stay on 3.13**, pin an older setuptools:
-
-```bash
-uv add "setuptools<71"
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/sarangKP/Face_Login.git
+git clone <repo>
 cd Face_Login
 uv sync
 ```
 
----
+`face-recognition-models` is installed from git source (see `pyproject.toml`). No extra steps needed.
 
-## Running
+**Run:**
 
 ```bash
-# auto-detects mode (pi if picamera2 is installed, otherwise laptop)
+# Auto-detect mode (Pi camera → pi, else → laptop)
 uv run uvicorn main:app --host 0.0.0.0 --port 8765
-```
 
-Force a specific mode:
-
-```bash
+# Force a mode
 DEVICE_MODE=laptop uv run uvicorn main:app --host 0.0.0.0 --port 8765
 DEVICE_MODE=pi     uv run uvicorn main:app --host 0.0.0.0 --port 8765
 ```
 
-Open **http://localhost:8765** in your browser.
-
-> **Tip:** if a USB webcam appears black, another process is holding `/dev/video0`.
-> Run `fuser -k /dev/video0` to release it, then restart the server.
+Open `http://<pi-ip>:8765` to register and log in.
 
 ---
 
-## API
+## Configuration
 
-### Face login
+All tunable parameters live in [`config.py`](config.py). No need to touch `tracker.py` or `servo.py`.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Login + register UI |
+### Tracking tuning
+
+| Setting | Default | Effect |
+|---|---|---|
+| `DEAD_ZONE_PX` | `30` | Face must move this many pixels off-centre before servo reacts |
+| `PID_KP` | `0.012` | Proportional gain — higher = faster tracking |
+| `PID_KD` | `0.003` | Derivative gain — increase if servo hunts/oscillates |
+| `PID_KI` | `0.0` | Integral gain — leave at 0 until KP/KD are stable |
+| `PID_OUTPUT_LIMIT_PAN` | `1.5` | Max degrees/tick the PID can request (pan) |
+| `PID_OUTPUT_LIMIT_TILT` | `1.2` | Max degrees/tick the PID can request (tilt) |
+| `SLEW_MAX_DEG` | `2.0` | Hard cap in `servo.py` — servo never jumps more than this per call |
+| `TARGET_FPS` | `20` | Tracker loop rate |
+
+Quick fixes:
+
+```
+Tracking too slow    → increase PID_KP  (0.012 → 0.020)
+Tracking too fast    → decrease PID_KP  (0.012 → 0.008)
+Servo oscillates     → increase PID_KD  (0.003 → 0.006)
+Jitter at centre     → increase DEAD_ZONE_PX (30 → 40)
+Movement too jumpy   → decrease SLEW_MAX_DEG (2.0 → 1.0)
+Movement too laggy   → increase SLEW_MAX_DEG (2.0 → 3.5)
+```
+
+### Identity bridge tuning
+
+| Setting | Default | Effect |
+|---|---|---|
+| `IDENTITY_CHECK_INTERVAL_S` | `3.0` | How often the recognition worker re-checks the frame. Don't go below ~2 s on Pi 5 |
+| `IDENTITY_TOLERANCE` | `0.50` | Face match strictness — lower = stricter. Shared by both `/login` and the recognition worker |
+| `IDENTITY_MAX_FACES` | `5` | Max faces encoded per recognition pass — protects against crowded frames |
+
+---
+
+## API Reference
+
+### Face DB
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/faces` | List all registered names |
+| `POST` | `/register` | Register a new face (JSON: `{name, images: [base64, ...]}`) |
+| `DELETE` | `/faces/{name}` | Delete a registered face |
+
+### Authentication
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/login` | Match a face image; returns `{success, name, token, confidence}`. On success, notifies the tracker. |
+
+### Tracking — servo state
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/track/status` | Current pan/tilt angles, PID errors, FPS |
+| `GET` | `/track/snapshot` | Latest annotated frame as JPEG |
+| `GET` | `/track/stream` | MJPEG stream with tracker overlay (~20 fps) |
+| `POST` | `/track/feed` | Push a browser frame into the camera buffer (browser-feed mode) |
+| `GET` | `/track/source` | Whether camera source is `picamera2` or `browser` |
+
+### Tracking — identity (Channel 1)
+
+Poll these from cloud agents on a slow cadence (every few seconds).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/track/person` | Who is being tracked, their position, whether the logged-in person is present anywhere in frame |
+| `GET` | `/track/identity` | Who the tracker is currently watching for |
+| `DELETE` | `/track/identity` | Clear the logged-in identity; recognition worker idles |
+
+`GET /track/person` response:
+
+```json
+{
+  "person": "Alice",
+  "position": {"x": 312, "y": 240},
+  "timestamp": 1715000000,
+  "frame_size": {"width": 640, "height": 480},
+  "identified_person_present": true,
+  "identified_name": "Alice",
+  "last_recognition_ts": 1715000000.123
+}
+```
+
+`person` values: `"Alice"` (confirmed), `"Unknown"` (unrecognised face), `null` (no face / recognition not yet run).
+
+### Frames (Channel 2)
+
+Raw camera feed without tracking overlay — for cloud / LLM agents that need to see the image.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/frames/current` | Raw JPEG + identity metadata in response headers |
+| `GET` | `/frames/event` | Atomic JSON: `{timestamp, frame: {base64, ...}, person, position, ...}` |
+| `GET` | `/frames/stream` | Continuous raw MJPEG (no overlay) |
+
+`/frames/current` response headers:
+
+```
+X-Timestamp                 — unix epoch seconds
+X-Tracked-Person            — name | "Unknown" | "" (empty = no face)
+X-Identified-Name           — who login set (empty if nobody is logged in)
+X-Identified-Person-Present — "true" / "false"
+X-Tracked-Position          — "x,y" in 640×480 pixels, or empty
+X-Frame-Width / X-Frame-Height
+```
+
+Use `/frames/current` when bandwidth matters (just read the headers). Use `/frames/event` when an LLM agent needs frame + identity in one parseable object.
+
+### Camera (raw feed for login page)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/camera/stream` | Raw MJPEG, no overlay — used by the login page preview |
+| `GET` | `/camera/frame` | Single raw JPEG — used by Pi login capture |
+
+### Misc
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Login / registration web UI |
+| `GET` | `/track` | Live tracking monitor page |
+| `GET` | `/config` | Current mode, is_pi flag, camera source |
 | `GET` | `/health` | `{"status": "ok"}` |
-| `GET` | `/config` | `{ mode, is_pi, source }` — frontend uses this to pick its capture path |
-| `GET` | `/faces` | List registered names |
-| `POST` | `/register` | Register face (multi-angle batch) |
-| `POST` | `/login` | Authenticate — returns token, redirects to `/track` |
-| `DELETE` | `/faces/{name}` | Remove a registered user |
-| `GET` | `/debug/last-frame` | JPEG of what the last `/login` call received |
-
-### Camera (raw, tracker-independent)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/camera/stream` | MJPEG stream straight from the camera, no overlay |
-| `GET` | `/camera/frame`  | Single raw JPEG frame |
-
-### Face tracking
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/track` | Live tracking monitor UI |
-| `GET` | `/track/status` | Pan/tilt angles, error offsets, FPS, simulate flag |
-| `GET` | `/track/stream` | MJPEG stream of annotated camera feed |
-| `GET` | `/track/snapshot` | Single annotated JPEG frame |
-| `POST` | `/track/feed` | Receive frame from browser (laptop browser-feed mode) |
-| `GET` | `/track/source` | Which camera source is active (`picamera2` / `browser`) |
-
-### POST `/register`
-
-```json
-{ "name": "Alice", "images": ["data:image/jpeg;base64,...", "..."] }
-```
-
-At least 3 usable face detections required across the 5 captured poses.
-
-```json
-{ "success": true, "message": "Registered 'Alice' with 5 face angles", "frames_used": 5 }
-```
-
-### POST `/login`
-
-```json
-{ "image": "data:image/jpeg;base64,..." }
-```
-
-```json
-{ "success": true, "name": "Alice", "token": "uuid4", "confidence": 87.3 }
-```
-
-Browser automatically redirects to `/track?name=Alice&token=<uuid>` on success.
+| `GET` | `/debug/last-frame` | Last image received by `/login` — remove before production |
 
 ---
 
-## Connecting to Elara Service
+## Visual overlay guide
 
-After a successful face login, use the returned `name` and `token` to start an Elara chat session.
+The annotated stream (`/track/stream`) shows:
 
-```python
-import httpx
+| Box colour | Meaning |
+|---|---|
+| **Cyan** | Tracked face confirmed as the logged-in person ✓ |
+| **Red** | Tracked face is someone else ("Unknown") |
+| **Green** | Face detected; recognition hasn't run yet |
 
-# 1. Face login
-login = httpx.post("http://localhost:8765/login", json={"image": frame_b64}).json()
-assert login["success"], "Face not recognized"
+Top-left banner states:
+- `Tracking: Alice` — Alice is the largest face being actively tracked
+- `Alice present (not tracked)` — Alice is in the background; a different person is being tracked
+- `Looking for: Alice` — Nobody recognised yet this cycle
 
-# 2. Start Elara session — state starts empty, must be echoed back every turn
-state = {}
-reply = httpx.post("http://elara-host:8000/chat", json={
-    "message": "Hello",
-    "state":   state,
-    "backend": "ollama",
-    "model":   "llama3",
-}).json()
-state = reply["state"]
-print(reply["reply"])
-```
-
-For streaming (SSE):
-
-```python
-with httpx.stream("POST", "http://elara-host:8000/chat/stream", json={...}) as r:
-    for line in r.iter_lines():
-        if line.startswith("data:"):
-            print(line[5:], end="", flush=True)
-```
+Bottom-left HUD: `[SIM]` or `[LIVE]`, current pan/tilt angles, loop FPS.
 
 ---
 
-## Raspberry Pi 5
+## Graceful degradation
 
-### Servo control — ESP32 over USB serial
-
-Pi 5 uses the **RP1 southbridge** for GPIO. Rather than fight RP1's PWM quirks (and the brown-out risk of driving servos from Pi rails), this project offloads servo control to a small ESP32 firmware.
-
-```
-Python (Pi)  ──USB serial──▶  ESP32  ──PWM──▶  pan + tilt servos
-```
-
-Wire-up:
-
-```
-ESP32 GPIO 13  →  pan  servo signal
-ESP32 GPIO 12  →  tilt servo signal
-Servo V+       →  separate 5 V supply  (do NOT use Pi 5 V or ESP32 3.3 V)
-Servo GND      →  common GND with the ESP32
-```
-
-Protocol on `/dev/ttyUSB*` at 115200 baud, newline-terminated:
-
-```
-P<pan_deg> T<tilt_deg>\n        e.g.   P105.3 T72.0
-```
-
-Steps:
-
-1. Flash the firmware in `esp32_servo/` (PlatformIO: open the folder → Upload).
-2. Wire as above. Use a dedicated 5 V PSU for the servos.
-3. `uv add pyserial` (already in `pyproject.toml`).
-4. Plug in the ESP32 — `servo.py` auto-detects the first `ttyUSB*`/`ttyACM*` port.
-
-If the ESP32 is missing or unreachable, the server starts anyway and prints:
-
-```
-ServoController: serial unavailable (...) — falling back to simulate mode.
-```
-
-You can then test the camera + PID + UI without any motors connected.
-
-> Two SG90s at stall current can brown-out a Pi 5 and corrupt the SD card.
-> Always power servos from a dedicated 5 V supply.
-
-### PID tuning
-
-Gains live at the top of `tracker.py`:
-
-```python
-PAN_PID_GAINS  = dict(kp=0.03, ki=0.0, kd=0.002, ...)
-TILT_PID_GAINS = dict(kp=0.03, ki=0.0, kd=0.002, ...)
-```
-
-- Tracking **sluggish** → increase `kp` (e.g. 0.03 → 0.07)
-- Mount **oscillates** → increase `kd` (e.g. 0.002 → 0.006)
-- Keep `ki=0` until Kp/Kd are stable — integral windup causes hunting
-
-### Performance
-
-| Setting | Value | Reason |
-|---------|-------|--------|
-| Camera resolution | 640 × 480 | Enforced by `picamera2` config / `decode_image()` |
-| Tracker detect resolution | 320 × 240 | Haar runs ~15–30 ms/frame |
-| Face detector (tracking) | Haar cascade | 10–30 ms vs 150–300 ms for HOG/dlib |
-| Face detector (login) | Haar + dlib encode | Better detection, same embedding quality |
-| `num_jitters` on login | 1 | Fastest; multi-angle DB compensates |
-
----
-
-## Diagnostics
-
-If the camera or face detection isn't working:
-
-```bash
-pkill -f uvicorn          # stop server so it releases the camera
-uv run python diagnose.py # saves test frames to debug_frames/
-```
-
-The script tests every video device × backend × codec combination, runs both Haar and `face_recognition` detection, and saves annotated PNGs so you can see exactly what the camera captures.
-
-Quick sanity check that `picamera2` sees the Pi Camera:
-
-```bash
-uv run python -c "
-import sys; sys.path.insert(0, '/usr/lib/python3/dist-packages')
-from picamera2 import Picamera2
-print(Picamera2.global_camera_info())
-"
-```
+| Missing hardware | Behaviour |
+|---|---|
+| No ESP32 | Servo commands are simulated (`[SIM]` in overlay); everything else works |
+| No Pi camera | Switches to browser-feed mode automatically; login and tracking still work via the web UI |
+| Tracker fails to start | All `/track/*` and `/frames/*` endpoints return `503`; `/login` and `/register` still work |
 
 ---
 
@@ -372,19 +240,17 @@ print(Picamera2.global_camera_info())
 
 ```
 Face_Login/
-├── config.py            # Mode selection (pi vs laptop) + frame-mirror flag
-├── main.py              # FastAPI app — all endpoints + tracker lifespan
-├── tracker.py           # CameraManager + FaceTracker (Haar detection + PID loop)
-├── pid.py               # Discrete PID controller with anti-windup
-├── servo.py             # Servo abstraction — ESP32 serial or simulate mode
-├── diagnose.py          # Camera + face detection diagnostic script
-├── esp32_servo/         # ESP32 firmware (PlatformIO project) for pan/tilt PWM
-├── templates/
-│   ├── index.html       # Guided registration + login UI → redirects to /track
-│   └── track.html       # Live tracking monitor (MJPEG feed + servo compass)
+├── main.py          # FastAPI app — all HTTP endpoints
+├── tracker.py       # CameraManager singleton + FaceTracker daemon threads
+├── config.py        # All tunable parameters — edit here, not in tracker.py
+├── pid.py           # Discrete PID controller with anti-windup
+├── servo.py         # ServoController — ESP32 serial abstraction
+├── diagnose.py      # Standalone diagnostic tool
 ├── faces/
-│   └── db.json          # Face encoding database (auto-created)
-├── debug_frames/        # Frames saved by diagnose.py (auto-created)
-├── pyproject.toml
-└── .python-version      # Pin to 3.12
+│   └── db.json      # Face encoding store — name → list of 128-float vectors
+├── templates/
+│   ├── index.html   # Login / registration page
+│   └── track.html   # Live tracking monitor
+└── esp32_servo/     # ESP32 firmware (PlatformIO)
+    └── src/main.cpp
 ```

@@ -55,7 +55,7 @@ FACES_DB.parent.mkdir(exist_ok=True)
 
 _last_login_frame: bytes = b""
 
-TOLERANCE = 0.50
+TOLERANCE = config.IDENTITY_TOLERANCE
 MIN_FRAMES = 3
 
 _haar = cv2.CascadeClassifier(
