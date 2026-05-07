@@ -499,6 +499,7 @@ async def frames_event():
         },
         "person":                    None,
         "position":                  {"x": None, "y": None},
+        "box":                       None,
         "identified_name":           None,
         "identified_person_present": False,
         "last_recognition_ts":       0.0,
@@ -513,6 +514,14 @@ async def frames_event():
             payload["position"] = {
                 "x": int(s.tracked_position[0]),
                 "y": int(s.tracked_position[1]),
+            }
+        if s.tracked_box is not None:
+            fx, fy, fw, fh = s.tracked_box
+            payload["box"] = {
+                "top":    fy,
+                "right":  fx + fw,
+                "bottom": fy + fh,
+                "left":   fx,
             }
     return payload
 

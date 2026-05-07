@@ -206,6 +206,7 @@ class TrackerState:
     tracked_label:       Optional[str]   = None   # name | "Unknown" | None
     identified_present:  bool            = False  # named person anywhere in frame
     tracked_position:    Optional[tuple] = None   # (cx, cy) of tracked bbox
+    tracked_box:         Optional[tuple] = None   # (x, y, w, h) of tracked bbox
     last_recognition_ts: float           = 0.0   # epoch seconds of last check
 
 
@@ -332,6 +333,7 @@ class FaceTracker:
                 tracked_label=s.tracked_label,
                 identified_present=s.identified_present,
                 tracked_position=s.tracked_position,
+                tracked_box=s.tracked_box,
                 last_recognition_ts=s.last_recognition_ts,
             )
 
@@ -403,9 +405,11 @@ class FaceTracker:
                 self._latest_face_box = face_box
 
             tracked_pos = None
+            tracked_box = None
             if face_box is not None:
                 fx, fy, fw, fh = face_box
                 tracked_pos = (fx + fw // 2, fy + fh // 2)
+                tracked_box = face_box
 
             with self._state_lock:
                 self._state.pan              = self._servo.pan
@@ -416,6 +420,7 @@ class FaceTracker:
                 self._state.fps              = round(fps, 1)
                 self._state.annotated_jpeg   = buf.tobytes()
                 self._state.tracked_position = tracked_pos
+                self._state.tracked_box      = tracked_box
                 if face_box is None:
                     self._state.tracked_label = None
 
