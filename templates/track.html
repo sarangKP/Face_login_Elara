@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Face Tracker Monitor — Elara</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+      background: #0a0a0e;
+      color: #e8e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+      gap: 1.25rem;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      width: 100%;
+      max-width: 900px;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; color: #fff; }
+    header a {
+      margin-left: auto;
+      font-size: 0.8rem;
+      color: #6b7280;
+      text-decoration: none;
+    }
+    header a:hover { color: #a78bfa; }
+
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: #6b7280;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.live    { background: #10b981; box-shadow: 0 0 6px #10b981; animation: blink 1.5s infinite; }
+    .dot.no-face { background: #f59e0b; }
+    .dot.error   { background: #ef4444; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── Main layout ─────────────────────────────────── */
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 1rem;
+      width: 100%;
+      max-width: 900px;
+    }
+    @media (max-width: 680px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    /* ── Camera feed ─────────────────────────────────── */
+    .feed-wrap {
+      position: relative;
+      background: #111118;
+      border: 1px solid #2a2a35;
+      border-radius: 12px;
+      overflow: hidden;
+      aspect-ratio: 4/3;
+    }
+    #feed {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .feed-offline {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      color: #6b7280;
+      font-size: 0.85rem;
+    }
+    .feed-offline span { font-size: 2rem; }
+
+    /* ── Right panel ─────────────────────────────────── */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .card {
+      background: #18181f;
+      border: 1px solid #2a2a35;
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .card-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6b7280;
+      margin-bottom: 0.75rem;
+    }
+
+    /* ── Angle gauges ────────────────────────────────── */
+    .gauge-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .gauge-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      margin-bottom: 0.2rem;
+    }
+    .gauge-label span:first-child { color: #a78bfa; }
+    .gauge-label span:last-child  { color: #fff; font-variant-numeric: tabular-nums; }
+    .gauge-track {
+      height: 6px;
+      background: #2a2a35;
+      border-radius: 3px;
+      overflow: visible;
+      position: relative;
+    }
+    .gauge-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.12s ease, background 0.3s;
+      background: #6c63ff;
+    }
+    /* centre tick */
+    .gauge-track::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: -3px;
+      width: 2px;
+      height: 12px;
+      background: #3a3a4a;
+      border-radius: 1px;
+    }
+
+    /* ── Error meters ────────────────────────────────── */
+    .error-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+    .error-box {
+      background: #0f0f13;
+      border: 1px solid #2a2a35;
+      border-radius: 7px;
+      padding: 0.5rem 0.6rem;
+      text-align: center;
+    }
+    .error-box .axis { font-size: 0.68rem; color: #6b7280; text-transform: uppercase; }
+    .error-box .val  {
+      font-size: 1.15rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: #fff;
+      line-height: 1.3;
+    }
+    .error-box.active .val { color: #f59e0b; }
+
+    /* ── Stats row ───────────────────────────────────── */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+    .stat {
+      background: #0f0f13;
+      border: 1px solid #2a2a35;
+      border-radius: 7px;
+      padding: 0.5rem 0.6rem;
+      text-align: center;
+    }
+    .stat .label { font-size: 0.68rem; color: #6b7280; text-transform: uppercase; }
+    .stat .value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #fff;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Servo compass ───────────────────────────────── */
+    .compass-wrap {
+      display: flex;
+      justify-content: center;
+      padding: 0.25rem 0;
+    }
+    canvas#compass {
+      border-radius: 50%;
+    }
+
+    /* ── Log ─────────────────────────────────────────── */
+    .log {
+      font-size: 0.72rem;
+      color: #6b7280;
+      height: 80px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+    .log .entry { border-bottom: 1px solid #1e1e28; padding: 1px 0; }
+    .log .entry.found { color: #10b981; }
+    .log .entry.lost  { color: #f59e0b; }
+  </style>
+</head>
+<body>
+
+  <!-- Hidden browser camera elements (browser-feed mode) -->
+  <video id="browser-cam" autoplay playsinline muted style="display:none"></video>
+  <canvas id="browser-canvas" style="display:none"></canvas>
+
+  <header>
+    <div class="dot" id="status-dot"></div>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <h1>Face Tracker <span id="welcome-name" style="color:#a78bfa"></span></h1>
+      <span id="source-badge" style="font-size:0.7rem;color:#6b7280;background:#1a1a24;
+            padding:2px 8px;border-radius:4px;border:1px solid #2a2a35;width:fit-content">detecting…</span>
+    </div>
+    <a href="/" style="margin-left:auto;font-size:0.8rem;color:#6b7280;text-decoration:none"
+       title="Logout">⏻ Logout</a>
+  </header>
+
+  <div class="layout">
+
+    <!-- Live camera feed (MJPEG from server) -->
+    <div class="feed-wrap">
+      <img id="feed" src="/track/stream" alt="tracker feed"
+           onerror="showOffline()" onload="hideOffline()"/>
+      <div class="feed-offline" id="offline-msg" style="display:none">
+        <span>📷</span>
+        No camera / tracker offline
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div class="panel">
+
+      <!-- Servo angles -->
+      <div class="card">
+        <div class="card-title">Servo Position</div>
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-label"><span>Pan</span><span id="pan-val">90.0°</span></div>
+            <div class="gauge-track">
+              <div class="gauge-fill" id="pan-fill" style="width:50%"></div>
+            </div>
+          </div>
+          <div>
+            <div class="gauge-label"><span>Tilt</span><span id="tilt-val">90.0°</span></div>
+            <div class="gauge-track">
+              <div class="gauge-fill" id="tilt-fill" style="width:50%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error offset -->
+      <div class="card">
+        <div class="card-title">Face Offset from Centre</div>
+        <div class="error-grid">
+          <div class="error-box" id="err-x-box">
+            <div class="axis">X (pan)</div>
+            <div class="val" id="err-x">—</div>
+          </div>
+          <div class="error-box" id="err-y-box">
+            <div class="axis">Y (tilt)</div>
+            <div class="val" id="err-y">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="card">
+        <div class="card-title">Stats</div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">FPS</div>
+            <div class="value" id="fps-val">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">Mode</div>
+            <div class="value" id="mode-val">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Compass -->
+      <div class="card">
+        <div class="card-title">Virtual Mount</div>
+        <div class="compass-wrap">
+          <canvas id="compass" width="120" height="120"></canvas>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="card">
+        <div class="card-title">Event Log</div>
+        <div class="log" id="log"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+  // ── Read login context from URL ───────────────────────────────────────────
+  const _params = new URLSearchParams(window.location.search);
+  const _name   = _params.get('name');
+  const _token  = _params.get('token');
+  if (_name) {
+    document.getElementById('welcome-name').textContent = `— ${_name}`;
+    document.title = `Tracking ${_name} — Elara`;
+  }
+  if (!_token) {
+    console.warn('No login token — access via the login page in production.');
+  }
+
+  const PAN_MIN  = 30,  PAN_MAX  = 150;
+  const TILT_MIN = 40,  TILT_MAX = 140;
+
+  let prevFaceFound = null;
+
+  function showOffline() {
+    document.getElementById('offline-msg').style.display = 'flex';
+    document.getElementById('feed').style.opacity = '0';
+  }
+  function hideOffline() {
+    document.getElementById('offline-msg').style.display = 'none';
+    document.getElementById('feed').style.opacity = '1';
+  }
+
+  // ── Compass canvas ────────────────────────────────────────────────────────
+  const compassCanvas = document.getElementById('compass');
+  const cctx = compassCanvas.getContext('2d');
+  const CR = 60;   // canvas centre
+
+  function drawCompass(pan, tilt) {
+    const W = compassCanvas.width, H = compassCanvas.height;
+    cctx.clearRect(0, 0, W, H);
+
+    // Background
+    cctx.beginPath();
+    cctx.arc(CR, CR, CR - 4, 0, Math.PI * 2);
+    cctx.fillStyle = '#0f0f13';
+    cctx.fill();
+    cctx.strokeStyle = '#2a2a35';
+    cctx.lineWidth = 1.5;
+    cctx.stroke();
+
+    // Inner ring
+    cctx.beginPath();
+    cctx.arc(CR, CR, CR - 16, 0, Math.PI * 2);
+    cctx.strokeStyle = '#1e1e28';
+    cctx.lineWidth = 1;
+    cctx.stroke();
+
+    // Axis ticks
+    cctx.strokeStyle = '#3a3a4a';
+    cctx.lineWidth = 1;
+    [[CR, 8, CR, 18], [CR, CR*2-8, CR, CR*2-18],
+     [8, CR, 18, CR], [CR*2-8, CR, CR*2-18, CR]].forEach(([x1,y1,x2,y2]) => {
+      cctx.beginPath(); cctx.moveTo(x1,y1); cctx.lineTo(x2,y2); cctx.stroke();
+    });
+
+    // Labels
+    cctx.fillStyle = '#6b7280';
+    cctx.font = '9px monospace';
+    cctx.textAlign = 'center';
+    cctx.fillText('L', 14, CR + 3);
+    cctx.fillText('R', W - 14, CR + 3);
+    cctx.fillText('U', CR, 14);
+    cctx.fillText('D', CR, H - 6);
+
+    const R = CR - 20;
+
+    const panN  = (pan  - 90) / ((PAN_MAX  - PAN_MIN)  / 2);
+    const tiltN = (tilt - 90) / ((TILT_MAX - TILT_MIN) / 2);
+    const px = CR + panN  * R;
+    const py = CR + tiltN * R;
+
+    // Shadow
+    cctx.beginPath();
+    cctx.arc(px, py, 9, 0, Math.PI * 2);
+    cctx.fillStyle = 'rgba(108,99,255,0.15)';
+    cctx.fill();
+
+    // Crosshair lines
+    cctx.strokeStyle = '#5048d4';
+    cctx.lineWidth = 1;
+    cctx.beginPath(); cctx.moveTo(CR, CR); cctx.lineTo(px, CR); cctx.stroke();
+    cctx.beginPath(); cctx.moveTo(CR, CR); cctx.lineTo(CR, py); cctx.stroke();
+
+    // Dot at intersection
+    cctx.beginPath();
+    cctx.arc(px, py, 6, 0, Math.PI * 2);
+    cctx.fillStyle = '#6c63ff';
+    cctx.fill();
+
+    // Centre dot
+    cctx.beginPath();
+    cctx.arc(CR, CR, 3, 0, Math.PI * 2);
+    cctx.fillStyle = '#3a3a4a';
+    cctx.fill();
+  }
+
+  drawCompass(90, 90);
+
+  // ── Log ───────────────────────────────────────────────────────────────────
+  function addLog(msg, cls = '') {
+    const log = document.getElementById('log');
+    const now = new Date().toLocaleTimeString('en', {hour12: false});
+    const el  = document.createElement('div');
+    el.className = 'entry ' + cls;
+    el.textContent = `${now}  ${msg}`;
+    log.prepend(el);
+    while (log.children.length > 40) log.removeChild(log.lastChild);
+  }
+
+  // ── Status polling ────────────────────────────────────────────────────────
+  async function poll() {
+    try {
+      const res  = await fetch('/track/status');
+      const data = await res.json();
+
+      // Status dot
+      const dot = document.getElementById('status-dot');
+      dot.className = 'dot ' + (data.face_found ? 'live' : 'no-face');
+
+      // Servo gauges — always update
+      const panPct  = ((data.pan  - PAN_MIN)  / (PAN_MAX  - PAN_MIN))  * 100;
+      const tiltPct = ((data.tilt - TILT_MIN) / (TILT_MAX - TILT_MIN)) * 100;
+      document.getElementById('pan-fill').style.width  = panPct  + '%';
+      document.getElementById('tilt-fill').style.width = tiltPct + '%';
+      document.getElementById('pan-val').textContent   = data.pan.toFixed(1)  + '°';
+      document.getElementById('tilt-val').textContent  = data.tilt.toFixed(1) + '°';
+
+      // FPS + Mode — always update (was inside face_found block before, which
+      // meant they stayed at "—" whenever no face was visible)
+      document.getElementById('fps-val').textContent  = data.fps.toFixed(0);
+      document.getElementById('mode-val').textContent = data.simulate ? 'SIM' : 'LIVE';
+
+      // Error offset — show values when face found, show 0 when no face
+      // (was only updating when face_found, leaving stale "—" otherwise)
+      const ex = document.getElementById('err-x');
+      const ey = document.getElementById('err-y');
+      if (data.face_found) {
+        ex.textContent = (data.error_x >= 0 ? '+' : '') + data.error_x.toFixed(0) + 'px';
+        ey.textContent = (data.error_y >= 0 ? '+' : '') + data.error_y.toFixed(0) + 'px';
+        document.getElementById('err-x-box').classList.toggle('active', Math.abs(data.error_x) > 15);
+        document.getElementById('err-y-box').classList.toggle('active', Math.abs(data.error_y) > 15);
+      } else {
+        ex.textContent = '0px';
+        ey.textContent = '0px';
+        document.getElementById('err-x-box').classList.remove('active');
+        document.getElementById('err-y-box').classList.remove('active');
+      }
+
+      // Compass — always update
+      drawCompass(data.pan, data.tilt);
+
+      // Event log — only log transitions
+      if (prevFaceFound !== null && data.face_found !== prevFaceFound) {
+        addLog(data.face_found ? 'Face acquired' : 'Face lost',
+               data.face_found ? 'found' : 'lost');
+      }
+      prevFaceFound = data.face_found;
+
+    } catch (e) {
+      document.getElementById('status-dot').className = 'dot error';
+    }
+  }
+
+  poll();
+  setInterval(poll, 200);   // status at 5 Hz — lightweight
+
+  // ── Browser-feed mode ─────────────────────────────────────────────────────
+  // When the server has no hardware camera (laptop dev), this page opens the
+  // browser camera and sends frames to POST /track/feed at ~15 fps.
+  // The server annotates them and pushes them back via /track/stream.
+
+  const bVideo  = document.getElementById('browser-cam');
+  const bCanvas = document.getElementById('browser-canvas');
+  const bCtx    = bCanvas.getContext('2d');
+  let   feedInterval = null;
+
+  async function startBrowserFeed() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: 'user' }, audio: false
+      });
+      bVideo.srcObject = stream;
+      await new Promise(r => bVideo.addEventListener('loadedmetadata', r, { once: true }));
+
+      addLog('Browser camera opened — sending frames to tracker', 'found');
+      document.getElementById('source-badge').textContent = '📷 browser-feed';
+
+      feedInterval = setInterval(sendFrame, 67);  // ~15 fps
+    } catch (e) {
+      addLog('Browser camera unavailable: ' + e.message, 'lost');
+    }
+  }
+
+  async function sendFrame() {
+    if (bVideo.readyState < 2) return;   // video not ready yet — skip frame
+    const w = bVideo.videoWidth  || 640;
+    const h = bVideo.videoHeight || 480;
+    bCanvas.width = w; bCanvas.height = h;
+    // Mirror the frame to undo the browser selfie-cam flip before sending to
+    // the server — face detection expects an unmirrored image
+    bCtx.save();
+    bCtx.scale(-1, 1);
+    bCtx.drawImage(bVideo, -w, 0, w, h);
+    bCtx.restore();
+
+    const image = bCanvas.toDataURL('image/jpeg', 0.75);
+    try {
+      await fetch('/track/feed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image }),
+      });
+    } catch (_) {}
+  }
+
+  // Check which source the server is using and start browser feed if needed.
+  // Retries every second until the server responds — fixes the race condition
+  // where checkSource() fired before the tracker was fully initialised.
+  async function checkSource() {
+    try {
+      const res  = await fetch('/track/source');
+      const data = await res.json();
+      if (data.source === 'browser') {
+        if (!feedInterval) startBrowserFeed();
+      } else {
+        document.getElementById('source-badge').textContent =
+          data.source === 'picamera2' ? '🎥 pi-camera' : '📷 webcam';
+      }
+    } catch (_) {
+      // Server not ready yet — retry in 1 s
+      setTimeout(checkSource, 1000);
+    }
+  }
+
+  checkSource();
+  </script>
+</body>
+</html>
