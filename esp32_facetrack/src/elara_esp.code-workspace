@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../elara_esp"
+		},
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../esp32_servo_test"
+		}
+	],
+	"settings": {}
+}

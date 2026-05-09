@@ -15,7 +15,7 @@ Finding the ESP32 port on Linux:
   dmesg | tail -20  # check kernel message after plugging in
 
 Protocol sent to ESP32 over serial (115200 baud, newline-terminated):
-  "P<pan_deg> T<tilt_deg>\n"   e.g. "P105.3 T72.0\n"
+  "F<pan_deg>\n"   e.g. "F105.3\n"
 
 Tuning
 ──────
@@ -79,10 +79,11 @@ class ServoController:
 
     def __init__(self, simulate: bool = SIMULATE):
         self.simulate = simulate
-        self._pan   = PAN_CENTER
-        self._tilt  = TILT_CENTER
-        self._lock  = threading.Lock()
-        self._serial = None
+        self._pan        = PAN_CENTER
+        self._tilt       = TILT_CENTER
+        self._lock       = threading.Lock()
+        self._serial     = None
+        self._esp32_angle: float | None = None  # last angle reported by ESP32
 
         if not simulate:
             try:
@@ -175,10 +176,51 @@ class ServoController:
 
         self._write(PAN_CENTER, TILT_CENTER)
         log.info("ServoController: connected to ESP32 on %s — servos centred.", port)
+        threading.Thread(target=self._serial_reader, daemon=True, name="ServoReader").start()
+
+    def _serial_reader(self) -> None:
+        """Read angle reports (A{angle}\n) sent by the ESP32 every 200ms."""
+        buf = ""
+        while self._serial is not None:
+            try:
+                n = self._serial.in_waiting
+                if n:
+                    buf += self._serial.read(n).decode(errors="ignore")
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        line = line.strip()
+                        if line.startswith("A"):
+                            try:
+                                with self._lock:
+                                    self._esp32_angle = float(line[1:])
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
+            import time; time.sleep(0.05)
+
+    def sync_pan_to_esp32(self) -> None:
+        """Sync Python's pan state to the angle last reported by the ESP32.
+        Call this when re-acquiring a face after SOUND mode so the next
+        absolute move() command is anchored to the real servo position."""
+        with self._lock:
+            if self._esp32_angle is not None:
+                self._pan = self._esp32_angle
+
+    def send_face_x(self, face_cx: int, frame_w: int) -> None:
+        """Send face x position so ESP can zone-map directly from pixel position.
+        Protocol: F<0-100>\n  (face centre as % of frame width)
+        """
+        if not self.simulate and self._serial is not None:
+            pct = int(face_cx * 100 / frame_w)
+            try:
+                self._serial.write(f"F{pct}\n".encode())
+            except Exception as exc:
+                log.warning("ServoController serial write error: %s", exc)
 
     def _write(self, pan: float, tilt: float) -> None:
         """Send one command frame. Caller must hold self._lock."""
-        cmd = f"P{pan:.1f} T{tilt:.1f}\n"
+        cmd = f"F{pan:.1f}\n"
         try:
             self._serial.write(cmd.encode())
         except Exception as exc:

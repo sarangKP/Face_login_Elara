@@ -354,6 +354,13 @@ class FaceTracker:
             face_box = self._detect(frame)
 
             if face_box is not None:
+                if self._no_face_count >= self._NO_FACE_RESET:
+                    # Re-acquiring after SOUND/IDLE mode — sync Python's pan to
+                    # where the servo physically is so the first face command
+                    # doesn't send a stale absolute angle that causes recentering.
+                    self._servo.sync_pan_to_esp32()
+                    self._pan_pid.reset()
+                    self._tilt_pid.reset()
                 self._no_face_count  = 0
                 self._last_face_time = time.monotonic()
                 fx, fy, fw, fh = face_box
@@ -376,8 +383,8 @@ class FaceTracker:
                 if self._no_face_count >= self._NO_FACE_RESET:
                     self._pan_pid.reset()
                     self._tilt_pid.reset()
-                if time.monotonic() - self._last_face_time >= self._NO_FACE_CENTER_S:
-                    self._servo.center()
+                # Do not call servo.center() here — it sends F90 which the
+                # ESP32 interprets as a face command and blocks sound mode.
 
             now   = time.monotonic()
             fps   = 1.0 / max(now - t_fps, 1e-6)
@@ -557,8 +564,8 @@ class FaceTracker:
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 cv2.equalizeHist(gray, gray)
                 faces = self._detector.detectMultiScale(
-                    gray, scaleFactor=1.15, minNeighbors=3,
-                    minSize=(20, 20), flags=cv2.CASCADE_SCALE_IMAGE,
+                    gray, scaleFactor=1.15, minNeighbors=4,
+                    minSize=(60, 60), flags=cv2.CASCADE_SCALE_IMAGE,
                 )
             except Exception as e:
                 log.debug("Recognition detect failed: %s", e)
