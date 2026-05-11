@@ -38,7 +38,7 @@ SIMULATE = False
 
 # ── Serial port ──────────────────────────────────────────────────────────────
 # Set explicitly or leave as None to auto-detect the first ttyUSB*/ttyACM*
-SERIAL_PORT: str | None = None
+SERIAL_PORT: str | None = "/dev/ttyUSB1"  # main ESP (eyes ESP is /dev/ttyUSB0)
 BAUD_RATE = 115200
 
 # ── Servo geometry ────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ PAN_CENTER  = 90.0
 TILT_CENTER = 90.0
 
 PAN_LIMITS  = (30.0, 150.0)
-TILT_LIMITS = (40.0, 140.0)
+TILT_LIMITS = (30.0, 150.0)
 
 # Slew rate — read from config so it's tunable from one place
 SLEW_MAX_DEG: float = config.SLEW_MAX_DEG
@@ -220,7 +220,7 @@ class ServoController:
 
     def _write(self, pan: float, tilt: float) -> None:
         """Send one command frame. Caller must hold self._lock."""
-        cmd = f"F{pan:.1f}\n"
+        cmd = f"P{pan:.1f}T{tilt:.1f}\n"
         try:
             self._serial.write(cmd.encode())
         except Exception as exc:

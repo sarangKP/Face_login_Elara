@@ -82,3 +82,41 @@ The system uses a **Raspberry Pi + ESP32** setup for smooth face tracking with i
   - Sound filtering: `NOISE_MULTIPLIER`, `SOUND_CONFIRM_MS`, `noise_floor`
 
 ---
+
+## Angle variables
+
+| Variable | What it is |
+|---|---|
+| `faceAngle` | Pan angle commanded by the Pi — where the face is horizontally |
+| `faceTiltAngle` | Tilt angle commanded by the Pi — where the face is vertically |
+| `snapAngle` | Pan angle from the mic array — where the sound is coming from |
+| `wantAngle` | The pan angle the ESP32 *wants* to move toward right now |
+| `wantTiltAngle` | The tilt angle the ESP32 *wants* to move toward right now |
+| `liveAngle` | The pan angle the servo is *actually* at (updated every loop tick) |
+| `liveTiltAngle` | The tilt angle the servo is *actually* at (updated every loop tick) |
+
+The `want` vs `live` split exists because the servo doesn't jump instantly — `driveServo()` moves `live` toward `want` a little each tick (EMA + slew rate), so motion is smooth.
+
+---
+
+## How the modes work
+
+**FACE mode** — Pi sees a face
+- The Pi sends `P<pan>T<tilt>` over serial. These become `faceAngle` and `faceTiltAngle`.
+- Both servos chase the face: pan left/right, tilt up/down.
+- `lastFaceMs` is updated every time a command arrives. If no command comes for 2 seconds, face is considered lost.
+
+**SOUND mode** — no face, but mic array hears something (or sound is coming from a clearly different direction than the face)
+- The mic array computes a horizontal angle from the time delay between the two INMP441 microphones.
+- Only pan follows this angle. Tilt is frozen at wherever it currently is (`liveTiltAngle`) — there's no vertical information from a 1D mic array.
+
+**IDLE mode** — no face, no sound
+- Both servos hold their current position. Nothing moves.
+
+---
+
+## Sound override (special case)
+
+Even when a face is being tracked, if the mic detects confirmed sound coming from more than 25° away from where the camera is pointing, the system temporarily switches to SOUND mode and pans toward the new speaker. Tilt still freezes. When the override ends, `faceAngle` is reset to the current live position so the Pi re-acquires from scratch rather than snapping back to a stale angle.
+
+---

@@ -1,14 +1,14 @@
 #include <Arduino.h>
 #include "driver/i2s.h"
 #include <ESP32Servo.h>
-#include <TFT_eSPI.h>
 #include <math.h>
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
 #define I2S_SD 32
 #define I2S_WS 15
 #define I2S_SCK 14
-#define SERVO_PIN 13
+#define SERVO_PIN      13
+#define TILT_SERVO_PIN 12
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
 #define SAMPLE_RATE 16000
@@ -36,25 +36,28 @@ float last_sound_angle = 90.0f;
 bool sound_direction_confirmed = false;
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── TFT ───────────────────────────────────────────────────────────────────────
-TFT_eSPI tft = TFT_eSPI();
-#define EYE_COLOR TFT_CYAN
-#define BG_COLOR TFT_BLACK
-static const int EYE_Y = 30;
-static const int L_EYE_X = 38;
-static const int R_EYE_X = 103;
-static int prevEyeOff = 999;
+// ── Eyes ESP (Serial2, TX=17) ─────────────────────────────────────────────────
+// Sends 'L', 'R', or 'C' on direction change so the eyes ESP shifts lookOffset.
+static char lastEyeDir = 'C';
 
 // ── Servo ─────────────────────────────────────────────────────────────────────
 Servo panServo;
-static float liveAngle = 90.0f;
-static float wantAngle = 90.0f;
+Servo tiltServo;
+static float liveAngle     = 90.0f;
+static float wantAngle     = 90.0f;
+static float liveTiltAngle = 90.0f;
+static float wantTiltAngle = 90.0f;
 static const float EMA_ALPHA = 0.12f;
 static const float RATE_DEG = 2.5f;
 static const float DEADBAND = 1.2f;
 
 // Minimum angular difference (degrees) between sound and face before we hand off
 #define SOUND_OVERRIDE_DEG 25.0f
+
+#define PAN_MIN  30.0f
+#define PAN_MAX  150.0f
+#define TILT_MIN 60.0f
+#define TILT_MAX 120.0f
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 enum Mode { FACE, SOUND, IDLE } mode = IDLE;
@@ -64,7 +67,8 @@ static SemaphoreHandle_t sMutex;
 
 // ── Serial / face ─────────────────────────────────────────────────────────────
 static String rxBuf;
-static float faceAngle = 90.0f;
+static float faceAngle     = 90.0f;
+static float faceTiltAngle = 90.0f;
 static uint32_t lastFaceMs = 0;
 #define FACE_TIMEOUT_MS 2000u
 
@@ -183,22 +187,21 @@ void taskI2S(void*) {
     }
 }
 
-// ── TFT eyes ──────────────────────────────────────────────────────────────────
-void drawEyes(int off) {
-    if (off == prevEyeOff) return;
-    prevEyeOff = off;
-    tft.fillRect(L_EYE_X - 20, EYE_Y, 130, 60, BG_COLOR);
-    tft.fillRoundRect(L_EYE_X + off, EYE_Y, 26, 50, 12, EYE_COLOR);
-    tft.fillRoundRect(R_EYE_X + off, EYE_Y, 26, 50, 12, EYE_COLOR);
-}
-
 // ── Servo drive ───────────────────────────────────────────────────────────────
 void driveServo() {
     float next = EMA_ALPHA * wantAngle + (1.0f - EMA_ALPHA) * liveAngle;
     float d = constrain(next - liveAngle, -RATE_DEG, RATE_DEG);
-    if (fabsf(d) < DEADBAND) return;
-    liveAngle += d;
-    panServo.write((int)liveAngle);
+    if (fabsf(d) >= DEADBAND) {
+        liveAngle = constrain(liveAngle + d, PAN_MIN, PAN_MAX);
+        panServo.write((int)liveAngle);
+    }
+
+    float nextT = EMA_ALPHA * wantTiltAngle + (1.0f - EMA_ALPHA) * liveTiltAngle;
+    float dT = constrain(nextT - liveTiltAngle, -RATE_DEG, RATE_DEG);
+    if (fabsf(dT) >= DEADBAND) {
+        liveTiltAngle = constrain(liveTiltAngle + dT, TILT_MIN, TILT_MAX);
+        tiltServo.write((int)(180.0f - liveTiltAngle));
+    }
 }
 
 // ── Serial parser ─────────────────────────────────────────────────────────────
@@ -207,8 +210,14 @@ void parseSerial() {
         char c = (char)Serial.read();
         if (c == '\n') {
             rxBuf.trim();
-            if (rxBuf.length() > 0 && rxBuf[0] == 'F') {
-                faceAngle = constrain(rxBuf.substring(1).toFloat(), 0.0f, 180.0f);
+            if (rxBuf.length() > 0 && rxBuf[0] == 'P') {
+                int tIdx = rxBuf.indexOf('T');
+                if (tIdx > 0) {
+                    faceAngle     = constrain(rxBuf.substring(1, tIdx).toFloat(), 0.0f, 180.0f);
+                    faceTiltAngle = constrain(rxBuf.substring(tIdx + 1).toFloat(), 0.0f, 180.0f);
+                } else {
+                    faceAngle = constrain(rxBuf.substring(1).toFloat(), 0.0f, 180.0f);
+                }
                 lastFaceMs = millis();
             }
             rxBuf = "";
@@ -221,15 +230,16 @@ void parseSerial() {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    tft.init();
-    tft.setRotation(1);
-    tft.fillScreen(BG_COLOR);
-    drawEyes(0);
+    Serial2.begin(115200); // TX2=pin17 → eyes ESP RX
 
     ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
     panServo.setPeriodHertz(50);
     panServo.attach(SERVO_PIN, 500, 2500);
     panServo.write(90);
+    tiltServo.setPeriodHertz(50);
+    tiltServo.attach(TILT_SERVO_PIN, 500, 2500);
+    tiltServo.write(90);
 
     i2s_config_t i2sCfg = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
@@ -288,18 +298,22 @@ void loop() {
 
     if (soundOverride) {
         mode = SOUND;
-        wantAngle = snapAngle;
+        wantAngle     = snapAngle;
+        wantTiltAngle = liveTiltAngle;  // hold tilt during sound override
     } else if (faceActive) {
         mode = FACE;
-        wantAngle = faceAngle;
+        wantAngle     = faceAngle;
+        wantTiltAngle = faceTiltAngle;
     } else if (snapActive) {
         mode = SOUND;
-        wantAngle = snapAngle;
-        faceAngle = liveAngle;
+        wantAngle     = snapAngle;
+        wantTiltAngle = liveTiltAngle;  // hold tilt while mic-only tracking
+        faceAngle     = liveAngle;
     } else {
         mode = IDLE;
-        wantAngle = liveAngle;
-        faceAngle = liveAngle;
+        wantAngle     = liveAngle;
+        wantTiltAngle = liveTiltAngle;
+        faceAngle     = liveAngle;
     }
 
     driveServo();
@@ -313,8 +327,11 @@ void loop() {
     }
 
     float diff = wantAngle - 90.0f;
-    int off = (diff < -15.0f) ? -16 : (diff > 15.0f) ? 16 : 0;
-    drawEyes(off);
+    char eyeDir = (diff < -15.0f) ? 'L' : (diff > 15.0f) ? 'R' : 'C';
+    if (eyeDir != lastEyeDir) {
+        Serial2.print(eyeDir);
+        lastEyeDir = eyeDir;
+    }
 
     delay(20);
 }
